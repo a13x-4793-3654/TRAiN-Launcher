@@ -1,0 +1,25 @@
+# Build artifacts
+bin/
+obj/
+dist/
+build/
+out/
+
+# Dependencies
+node_modules/
+
+# IDE / editor
+.vs/
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Environment / secrets
+.env
+*.pfx

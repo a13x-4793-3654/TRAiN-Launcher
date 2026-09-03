@@ -1,31 +1,147 @@
 //! TRAiN Launcher デスクトップアプリ(Tauri)本体。
 //!
 //! フロントエンド(React)から `@tauri-apps/api` の `invoke()` 経由で呼び出す
-//! Tauri commandsをここに定義する。各commandは `crates/*` のスタブ実装を呼び出しており、
-//! 現時点では「未実装」エラーを返すが、crate間の配線(呼び出し経路)自体は疎通済み。
+//! Tauri commandsをここに定義する。認証系commandは `train_launcher_auth` の実装を呼び出し、
+//! 取得したトークンはOSの資格情報ストア(keyring)に保存する。
+//! 実際にサインインを試すには Microsoft Entra ID / Discord Developer Portal でのアプリ登録と、
+//! 対応する環境変数(`TRAIN_LAUNCHER_MS_CLIENT_ID` 等、詳細はREADME参照)の設定が必要。
+
+use serde::Serialize;
+use tauri::{AppHandle, Emitter};
+use tauri_plugin_opener::OpenerExt;
+use train_launcher_auth::store::{self, Provider, TokenRecord};
+use train_launcher_auth::{config, discord, msa, xbox};
+
+/// フロントエンドへ返すサインイン結果。
+#[derive(Debug, Clone, Serialize)]
+struct SignInResult {
+    display_name: String,
+}
+
+/// MSAデバイスコードフロー中にフロントエンドへemitするイベント名。
+const MSA_DEVICE_CODE_EVENT: &str = "msa://device-code";
+
+/// フロントエンドへemitするMSAデバイスコード情報(verification_uri/user_code)。
+#[derive(Debug, Clone, Serialize)]
+struct MsaDeviceCodePayload {
+    verification_uri: String,
+    user_code: String,
+    expires_in_secs: u64,
+}
 
 /// Discordでサインインする。
 ///
-/// TODO: `train_launcher_auth::discord::sign_in` の実装完了後、実際のOAuth2フロー
-/// (ブラウザを開いてリダイレクトを受け取る等)をここから起動する。
+/// 環境変数 `TRAIN_LAUNCHER_DISCORD_CLIENT_ID` (必須) / `TRAIN_LAUNCHER_DISCORD_CLIENT_SECRET`
+/// (任意) / `TRAIN_LAUNCHER_DISCORD_CALLBACK_PORT` (任意) が必要。認可URLが用意できた時点で
+/// システムブラウザを自動的に開く。取得したトークンはkeyringに保存する。
 #[tauri::command]
-async fn sign_in_with_discord() -> Result<String, String> {
-    match train_launcher_auth::discord::sign_in("TODO_DISCORD_CLIENT_ID").await {
-        Ok(_token) => Ok("Discordでサインインしました".to_string()),
-        Err(err) => Err(format!("Discordサインインは未実装です ({err})")),
-    }
+async fn sign_in_with_discord(app_handle: AppHandle) -> Result<SignInResult, String> {
+    let config = config::DiscordConfig::from_env().map_err(|err| err.to_string())?;
+
+    let token = discord::sign_in(&config, move |url| {
+        if let Err(err) = app_handle.opener().open_url(&url, None::<&str>) {
+            // ブラウザを自動的に開けなくても致命的ではない(ユーザーがURLを手動で開ける可能性がある)
+            // ため、ログ出力のみに留めてフロー自体は継続する。
+            eprintln!("failed to open browser for Discord sign-in: {err}");
+        }
+    })
+    .await
+    .map_err(|err| err.to_string())?;
+
+    store::save_token(
+        Provider::Discord,
+        &TokenRecord {
+            access_token: token.access_token.clone(),
+            refresh_token: token.refresh_token.clone(),
+            expires_at: token.expires_at,
+            display_name: Some(token.username.clone()),
+        },
+    )
+    .map_err(|err| err.to_string())?;
+
+    Ok(SignInResult {
+        display_name: token.username,
+    })
 }
 
 /// Microsoftアカウント(MSA)でサインインする。
 ///
-/// TODO: `train_launcher_auth::msa::sign_in` → `train_launcher_auth::xbox::exchange_microsoft_token`
-/// の実装完了後、実際のMSA→XboxLive→XSTS→Minecraftトークン変換フローをここから起動する。
+/// 環境変数 `TRAIN_LAUNCHER_MS_CLIENT_ID` が必要。デバイスコードフローのため、
+/// verification_uri/user_codeを `msa://device-code` イベントでフロントエンドへ通知し、
+/// ユーザーがブラウザ側で認可するのを待つ。MSAトークン取得後、続けてXboxLive/XSTSを経由して
+/// Minecraftトークンへ変換し、Minecraftプレイヤー名を取得する。
 #[tauri::command]
-async fn sign_in_with_microsoft() -> Result<String, String> {
-    match train_launcher_auth::msa::sign_in("TODO_MSA_CLIENT_ID").await {
-        Ok(_token) => Ok("Microsoftアカウントでサインインしました".to_string()),
-        Err(err) => Err(format!("Microsoftサインインは未実装です ({err})")),
-    }
+async fn sign_in_with_microsoft(app_handle: AppHandle) -> Result<SignInResult, String> {
+    let config = config::MicrosoftConfig::from_env().map_err(|err| err.to_string())?;
+
+    let msa_token = msa::sign_in(&config, move |info| {
+        let payload = MsaDeviceCodePayload {
+            verification_uri: info.verification_uri,
+            user_code: info.user_code,
+            expires_in_secs: info.expires_in_secs,
+        };
+        if let Err(err) = app_handle.emit(MSA_DEVICE_CODE_EVENT, payload) {
+            eprintln!("failed to emit MSA device code event: {err}");
+        }
+    })
+    .await
+    .map_err(|err| err.to_string())?;
+
+    let minecraft_token = xbox::exchange_microsoft_token(&msa_token.access_token)
+        .await
+        .map_err(|err| err.to_string())?;
+
+    let display_name = minecraft_token
+        .username
+        .clone()
+        .unwrap_or_else(|| "Minecraftプレイヤー(ユーザー名取得失敗)".to_string());
+
+    store::save_token(
+        Provider::Microsoft,
+        &TokenRecord {
+            access_token: minecraft_token.access_token,
+            refresh_token: msa_token.refresh_token,
+            expires_at: msa_token.expires_at,
+            display_name: Some(display_name.clone()),
+        },
+    )
+    .map_err(|err| err.to_string())?;
+
+    Ok(SignInResult { display_name })
+}
+
+/// Discordのサインアウト(保存済みトークンの削除)。
+#[tauri::command]
+fn sign_out_discord() -> Result<(), String> {
+    store::delete_token(Provider::Discord).map_err(|err| err.to_string())
+}
+
+/// Microsoftのサインアウト(保存済みトークンの削除)。
+#[tauri::command]
+fn sign_out_microsoft() -> Result<(), String> {
+    store::delete_token(Provider::Microsoft).map_err(|err| err.to_string())
+}
+
+/// 現在のサインイン状態を取得する(アプリ起動時のセッション復元UX用)。
+#[derive(Debug, Clone, Serialize)]
+struct AuthStatus {
+    discord_display_name: Option<String>,
+    microsoft_display_name: Option<String>,
+}
+
+#[tauri::command]
+fn get_auth_status() -> Result<AuthStatus, String> {
+    let discord_display_name = store::load_token(Provider::Discord)
+        .map_err(|err| err.to_string())?
+        .and_then(|record| record.display_name);
+    let microsoft_display_name = store::load_token(Provider::Microsoft)
+        .map_err(|err| err.to_string())?
+        .and_then(|record| record.display_name);
+
+    Ok(AuthStatus {
+        discord_display_name,
+        microsoft_display_name,
+    })
 }
 
 /// 保存済みプロファイル一覧を取得する(スタブ)。
@@ -70,6 +186,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             sign_in_with_discord,
             sign_in_with_microsoft,
+            sign_out_discord,
+            sign_out_microsoft,
+            get_auth_status,
             list_profiles,
             list_member_servers,
             resolve_mod_url,

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   FluentProvider,
   webLightTheme,
@@ -14,6 +14,16 @@ import {
   Toast,
   ToastTitle,
   ToastBody,
+  Dialog,
+  DialogSurface,
+  DialogTitle,
+  DialogBody,
+  DialogContent,
+  DialogActions,
+  DialogTrigger,
+  Spinner,
+  Text,
+  Body1Strong,
 } from "@fluentui/react-components";
 import type { SelectTabEventHandler } from "@fluentui/react-components";
 import {
@@ -23,6 +33,7 @@ import {
   SettingsRegular,
 } from "@fluentui/react-icons";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { useSystemTheme } from "./useSystemTheme";
 import { HomePage } from "./pages/Home";
 import { ServersPage } from "./pages/Servers";
@@ -30,6 +41,22 @@ import { ProfilesPage } from "./pages/Profiles";
 import { SettingsPage } from "./pages/Settings";
 
 const TOASTER_ID = "train-launcher-toaster";
+const MSA_DEVICE_CODE_EVENT = "msa://device-code";
+
+interface SignInResult {
+  display_name: string;
+}
+
+interface AuthStatus {
+  discord_display_name: string | null;
+  microsoft_display_name: string | null;
+}
+
+interface MsaDeviceCodePayload {
+  verification_uri: string;
+  user_code: string;
+  expires_in_secs: number;
+}
 
 const useStyles = makeStyles({
   root: {
@@ -50,6 +77,7 @@ const useStyles = makeStyles({
   },
   headerActions: {
     display: "flex",
+    alignItems: "center",
     gap: tokens.spacingHorizontalS,
   },
   body: {
@@ -70,6 +98,12 @@ const useStyles = makeStyles({
     overflow: "auto",
     padding: tokens.spacingHorizontalXXL,
   },
+  deviceCode: {
+    fontSize: tokens.fontSizeHero800,
+    letterSpacing: "0.2em",
+    textAlign: "center",
+    padding: tokens.spacingVerticalM,
+  },
 });
 
 type NavKey = "home" | "servers" | "profiles" | "settings";
@@ -81,50 +115,130 @@ function AppShell() {
   const [selected, setSelected] = useState<NavKey>("home");
   const { dispatchToast } = useToastController(TOASTER_ID);
 
+  const [authStatus, setAuthStatus] = useState<AuthStatus>({
+    discord_display_name: null,
+    microsoft_display_name: null,
+  });
+  const [discordSigningIn, setDiscordSigningIn] = useState(false);
+  const [microsoftSigningIn, setMicrosoftSigningIn] = useState(false);
+  const [deviceCode, setDeviceCode] = useState<MsaDeviceCodePayload | null>(
+    null,
+  );
+
+  const refreshAuthStatus = () => {
+    invoke<AuthStatus>("get_auth_status")
+      .then(setAuthStatus)
+      .catch((err) => console.error("failed to load auth status", err));
+  };
+
+  // 起動時に保存済みセッション(keyring)からサインイン状態を復元する。
+  useEffect(() => {
+    refreshAuthStatus();
+  }, []);
+
+  // MSAデバイスコードフロー中、Rust側から届く verification_uri/user_code を表示する。
+  useEffect(() => {
+    const unlisten = listen<MsaDeviceCodePayload>(
+      MSA_DEVICE_CODE_EVENT,
+      (event) => setDeviceCode(event.payload),
+    );
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, []);
+
   const onTabSelect: SelectTabEventHandler = (_event, data) => {
     setSelected(data.value as NavKey);
   };
 
-  // TODO: 実際のOAuth2/MSA認証フロー完成後、`invoke` の戻り値でサインイン状態を
-  // グローバルなアプリ状態(Contextやストア)に反映する。現時点ではトースト表示のみ。
-  const notify = (provider: string, promise: Promise<string>) => {
-    promise
-      .then((message) =>
-        dispatchToast(
-          <Toast>
-            <ToastTitle>{provider}でサインイン</ToastTitle>
-            <ToastBody>{message}</ToastBody>
-          </Toast>,
-          { intent: "success" },
-        ),
-      )
-      .catch((err) =>
-        dispatchToast(
-          <Toast>
-            <ToastTitle>{provider}でサインイン</ToastTitle>
-            <ToastBody>{String(err)}</ToastBody>
-          </Toast>,
-          { intent: "error" },
-        ),
-      );
+  const notifySuccess = (provider: string, displayName: string) =>
+    dispatchToast(
+      <Toast>
+        <ToastTitle>{provider}でサインイン</ToastTitle>
+        <ToastBody>{displayName} としてサインインしました</ToastBody>
+      </Toast>,
+      { intent: "success" },
+    );
+
+  const notifyError = (provider: string, err: unknown) =>
+    dispatchToast(
+      <Toast>
+        <ToastTitle>{provider}でサインイン</ToastTitle>
+        <ToastBody>{String(err)}</ToastBody>
+      </Toast>,
+      { intent: "error" },
+    );
+
+  const handleDiscordSignIn = () => {
+    setDiscordSigningIn(true);
+    invoke<SignInResult>("sign_in_with_discord")
+      .then((result) => {
+        notifySuccess("Discord", result.display_name);
+        refreshAuthStatus();
+      })
+      .catch((err) => notifyError("Discord", err))
+      .finally(() => setDiscordSigningIn(false));
   };
 
-  const handleDiscordSignIn = () =>
-    notify("Discord", invoke<string>("sign_in_with_discord"));
-  const handleMicrosoftSignIn = () =>
-    notify("Microsoft", invoke<string>("sign_in_with_microsoft"));
+  const handleMicrosoftSignIn = () => {
+    setMicrosoftSigningIn(true);
+    invoke<SignInResult>("sign_in_with_microsoft")
+      .then((result) => {
+        notifySuccess("Microsoft", result.display_name);
+        refreshAuthStatus();
+      })
+      .catch((err) => notifyError("Microsoft", err))
+      .finally(() => {
+        setMicrosoftSigningIn(false);
+        setDeviceCode(null);
+      });
+  };
+
+  const handleDiscordSignOut = () => {
+    invoke("sign_out_discord")
+      .then(() => refreshAuthStatus())
+      .catch((err) => notifyError("Discord", err));
+  };
+
+  const handleMicrosoftSignOut = () => {
+    invoke("sign_out_microsoft")
+      .then(() => refreshAuthStatus())
+      .catch((err) => notifyError("Microsoft", err));
+  };
 
   return (
     <div className={styles.root}>
       <header className={styles.header}>
         <Title1 as="h1">TRAiN Launcher</Title1>
         <div className={styles.headerActions}>
-          <Button appearance="secondary" onClick={handleDiscordSignIn}>
-            Discordでサインイン
-          </Button>
-          <Button appearance="primary" onClick={handleMicrosoftSignIn}>
-            Microsoftでサインイン
-          </Button>
+          {authStatus.discord_display_name ? (
+            <Button appearance="secondary" onClick={handleDiscordSignOut}>
+              Discord: {authStatus.discord_display_name} (サインアウト)
+            </Button>
+          ) : (
+            <Button
+              appearance="secondary"
+              onClick={handleDiscordSignIn}
+              disabled={discordSigningIn}
+              icon={discordSigningIn ? <Spinner size="tiny" /> : undefined}
+            >
+              Discordでサインイン
+            </Button>
+          )}
+          {authStatus.microsoft_display_name ? (
+            <Button appearance="primary" onClick={handleMicrosoftSignOut}>
+              {authStatus.microsoft_display_name} (サインアウト)
+            </Button>
+          ) : (
+            <Button
+              appearance="primary"
+              onClick={handleMicrosoftSignIn}
+              disabled={microsoftSigningIn}
+              icon={microsoftSigningIn ? <Spinner size="tiny" /> : undefined}
+            >
+              Microsoftでサインイン
+            </Button>
+          )}
         </div>
       </header>
       <div className={styles.body}>
@@ -156,6 +270,42 @@ function AppShell() {
         </main>
       </div>
       <Toaster toasterId={TOASTER_ID} />
+      <Dialog open={microsoftSigningIn && deviceCode !== null}>
+        <DialogSurface>
+          <DialogBody>
+            <DialogTitle>Microsoftアカウントでサインイン</DialogTitle>
+            <DialogContent>
+              <Text>
+                ブラウザで以下のURLを開き、表示されたコードを入力してください。
+              </Text>
+              {deviceCode && (
+                <>
+                  <Body1Strong as="p">
+                    {deviceCode.verification_uri}
+                  </Body1Strong>
+                  <div className={styles.deviceCode}>
+                    {deviceCode.user_code}
+                  </div>
+                </>
+              )}
+              <Text>認可が完了するまでこのダイアログは自動的に閉じます。</Text>
+            </DialogContent>
+            <DialogActions>
+              <DialogTrigger disableButtonEnhancement>
+                <Button
+                  appearance="secondary"
+                  onClick={() => {
+                    setMicrosoftSigningIn(false);
+                    setDeviceCode(null);
+                  }}
+                >
+                  キャンセル(表示を閉じる)
+                </Button>
+              </DialogTrigger>
+            </DialogActions>
+          </DialogBody>
+        </DialogSurface>
+      </Dialog>
     </div>
   );
 }

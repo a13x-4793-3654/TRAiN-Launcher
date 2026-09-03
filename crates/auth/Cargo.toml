@@ -8,8 +8,13 @@ description = "TRAiN Launcher: MSA / XboxLive / Minecraft authentication chain a
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
-reqwest = { version = "0.12", features = ["json"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "native-tls"] }
 thiserror = "1"
 oauth2 = "5"
 minecraft-msa-auth = "0.5"
+# OSネイティブの資格情報ストア(Windows Credential Manager / macOS Keychain / Linux Secret
+# Service)にトークンを安全に保存するために使用。keyring crateはv3系ではデフォルト機能が
+# 無いため、各OS向けのネイティブバックエンドを明示的に有効化する必要がある
+# (無効なプラットフォームの依存関係は各OS向けにcfgでゲートされているため無害)。
+keyring = { version = "3", features = ["windows-native", "apple-native", "linux-native"] }

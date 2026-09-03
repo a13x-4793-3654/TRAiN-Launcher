@@ -25,6 +25,7 @@ TRAiN Launcher は、TRAiN 管理下のサーバーに参加しているユー�
 
 - Microsoft アカウントでのサインインには Microsoft Entra ID (Azure AD) アプリ登録 + Minecraft API 利用申請 (`XboxLive.signin` スコープ) が必要
 - Discord サインインには Discord OAuth2 を利用
+- 認証フロー自体は `crates/auth` に実装済み(MSAはデバイスコードフロー、DiscordはPKCE付き認可コードフロー+ローカルループバックサーバでのリダイレクト受信)。取得したトークンはOSの資格情報ストア(Windows Credential Manager / macOS Keychain / Linux Secret Service)に保存される
 
 ## 開発環境セットアップ
 
@@ -58,6 +59,26 @@ TRAiN Launcher は、TRAiN 管理下のサーバーに参加しているユー�
    cargo build --workspace
    ```
 
+### サインイン機能を試すための環境変数(OAuth2アプリ登録)
+
+MSA/Discordサインインを実際に動作させるには、それぞれのアプリ登録情報を環境変数として設定する必要があります。未設定の場合、サインインボタンを押すと日本語のエラーメッセージ(どの環境変数が不足しているか)が表示されます。
+
+| 環境変数 | 必須 | 説明 |
+| --- | --- | --- |
+| `TRAIN_LAUNCHER_MS_CLIENT_ID` | Microsoftサインインに必須 | [Microsoft Entra ID](https://portal.azure.com/) で登録したアプリの クライアントID。個人用Microsoftアカウント (`consumers` テナント) 向けに、パブリッククライアントとしてデバイスコードフローを許可する必要があります |
+| `TRAIN_LAUNCHER_DISCORD_CLIENT_ID` | Discordサインインに必須 | [Discord Developer Portal](https://discord.com/developers/applications) で登録したアプリのクライアントID |
+| `TRAIN_LAUNCHER_DISCORD_CLIENT_SECRET` | 任意 | Discordアプリのクライアントシークレット(Developer Portal側の設定によっては不要) |
+| `TRAIN_LAUNCHER_DISCORD_CALLBACK_PORT` | 任意(デフォルト `38271`) | ローカルループバックリダイレクトサーバのポート番号。Discord Developer Portal の "Redirects" に `http://127.0.0.1:{ポート番号}/callback` を同じ値で事前登録しておく必要があります(Discordはワイルドカードポートを許可しないため) |
+
+例(PowerShellで `cargo tauri dev` の前に設定):
+```powershell
+$env:TRAIN_LAUNCHER_MS_CLIENT_ID = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+$env:TRAIN_LAUNCHER_DISCORD_CLIENT_ID = "123456789012345678"
+npm run dev
+```
+
+> **注意**: この開発環境には実際のMicrosoft Entra ID / Discord Developer Portal のアプリ登録がないため、エンドツーエンドのサインイン動作確認は行えていません。ビルド成功・ユニットテスト(設定読み込み・URL構築ロジック)の確認までを実施済みです。実際の登録情報を用意できる環境で動作確認を行ってください。
+
 ### ワークスペース構成
 
 ```
@@ -74,7 +95,7 @@ frontend/          # React + Vite + TypeScript + Fluent UI React v9 (`@fluentui/
 
 ### 補足
 
-- 現段階は初期スキャフォールディングであり、各 crate の多くの関数は TODO コメント付きのスタブ実装です(MSA/Discord 認証フロー、Minecraft 本体の起動処理、Mod 依存解決・ダウンロード、TRAiN 独自APIの実装は今後のタスクで対応予定)
+- MSA/Discord 認証フロー(`crates/auth`)は実装済みです。Minecraft 本体の起動処理、Mod 依存解決・ダウンロード、TRAiN 独自APIの実装は今後のタスクで対応予定です
 - Windows で `cargo build` 時に MSVC ヘッダ(`vcruntime.h` 等)が見つからないエラーが出る場合は、Visual Studio Installer で「C++ によるデスクトップ開発」ワークロードが正しくインストールされているか確認してください
 
 ## ステータス

@@ -9,7 +9,5 @@ use crate::ModsError;
 ///
 /// TODO: `modrinth`/`curseforge` モジュールを利用したダウンロード・設置処理を実装する。
 pub async fn install_from_url(_url: &str) -> Result<(), ModsError> {
-    Err(ModsError::NotImplemented(
-        "resource_pack::install_from_url",
-    ))
+    Err(ModsError::NotImplemented("resource_pack::install_from_url"))
 }

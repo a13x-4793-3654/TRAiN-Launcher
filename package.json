@@ -1,0 +1,15 @@
+{
+  "name": "train-launcher",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "workspaces": [
+    "frontend",
+    "apps/desktop"
+  ],
+  "scripts": {
+    "dev": "npm run tauri dev --workspace=apps/desktop",
+    "build": "npm run build --workspace=frontend",
+    "tauri": "npm run tauri --workspace=apps/desktop"
+  }
+}

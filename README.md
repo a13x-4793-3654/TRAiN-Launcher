@@ -26,9 +26,60 @@ TRAiN Launcher は、TRAiN 管理下のサーバーに参加しているユー�
 - Microsoft アカウントでのサインインには Microsoft Entra ID (Azure AD) アプリ登録 + Minecraft API 利用申請 (`XboxLive.signin` スコープ) が必要
 - Discord サインインには Discord OAuth2 を利用
 
+## 開発環境セットアップ
+
+### 前提条件
+
+- **Rust** (stable) — [rustup](https://rustup.rs/) 経由でインストールしてください
+  - Windows の場合は Visual Studio Build Tools の「C++ によるデスクトップ開発」ワークロード(MSVC ツールセット・Windows SDK)が必要です
+- **Node.js** 20.x 以上 と npm
+- **Tauri CLI の前提条件**(WebView2 ランタイムなど): [Tauri Prerequisites](https://tauri.app/start/prerequisites/) を参照してください
+  - Windows 10/11 には標準で WebView2 Runtime が含まれていることが多いですが、ない場合は別途インストールが必要です
+  - Tauri CLI 自体は `npm install` で `apps/desktop` の devDependency (`@tauri-apps/cli`) として導入されるため、別途グローバルインストールは不要です
+
+### セットアップ手順
+
+1. 依存関係のインストール(ルートで npm workspaces を使用し、`frontend/` と `apps/desktop/` の依存も併せて解決されます)
+   ```powershell
+   npm install
+   ```
+2. 開発モードで起動(Tauri アプリがフロントエンドの dev server を自動起動し、ウィンドウが開きます)
+   ```powershell
+   npm run dev
+   ```
+   内部的には `apps/desktop` で Tauri CLI (`tauri dev`) が実行され、`frontend` の Vite dev server (`http://localhost:1420`) と連携します。
+3. ビルド
+   ```powershell
+   npm run build         # フロントエンドのみビルド (tsc && vite build)
+   npm run tauri build   # Tauri アプリ全体をビルド(実行ファイル・インストーラ一式を生成)
+   ```
+4. Rust ワークスペース単体のビルド・確認(フロントエンドを介さない場合)
+   ```powershell
+   cargo build --workspace
+   ```
+
+### ワークスペース構成
+
+```
+Cargo.toml         # Cargo workspace ルート
+crates/
+  core/            # train-launcher-core: プロファイル管理、MCバージョンマニフェスト/ライブラリ/アセットのダウンロード、起動コマンド構築
+  auth/            # train-launcher-auth: MSA/XboxLive/Minecraft 認証チェーン、Discord OAuth2
+  mods/            # train-launcher-mods: Modrinth/CurseForge からの Mod 解決・依存関係自動解決・インストール
+  train-api/       # train-launcher-server-api: TRAiN 独自バックエンドAPIクライアント(現時点ではトレイト+モックのスタブ実装)
+apps/
+  desktop/         # Tauri アプリ本体(上記 crate を呼び出す Tauri commands を定義)
+frontend/          # React + Vite + TypeScript + Fluent UI React v9 (`@fluentui/react-components`) 製フロントエンド
+```
+
+### 補足
+
+- 現段階は初期スキャフォールディングであり、各 crate の多くの関数は TODO コメント付きのスタブ実装です(MSA/Discord 認証フロー、Minecraft 本体の起動処理、Mod 依存解決・ダウンロード、TRAiN 独自APIの実装は今後のタスクで対応予定)
+- Windows で `cargo build` 時に MSVC ヘッダ(`vcruntime.h` 等)が見つからないエラーが出る場合は、Visual Studio Installer で「C++ によるデスクトップ開発」ワークロードが正しくインストールされているか確認してください
+
 ## ステータス
 
-現在、企画・設計段階です。仕様は今後変更される可能性があります。
+現在、初期スキャフォールディング段階です。仕様は今後変更される可能性があります。
 
 ## ライセンス
 

@@ -1,8 +1,14 @@
 //! OSネイティブの資格情報ストア(keyring crate)を使ったトークン永続化。
 //!
 //! Windows Credential Manager / macOS Keychain / Linux Secret Service にJSONシリアライズした
-//! `TokenRecord` を1エントリとして保存する。サービス名は固定で `"train-launcher"`、
+//! `TokenRecord` を保存する。サービス名は固定で `"train-launcher"`、
 //! ユーザー名にプロバイダ識別子(`"discord"` / `"microsoft"`)を使う。
+//!
+//! Windows Credential Managerの1エントリあたりの容量制限(パスワードがUTF-16で
+//! 2560文字を超えられない)を回避するため、`access_token` と
+//! `refresh_token`/`expires_at`/`display_name` を別々の2エントリに分割して保存する
+//! (MinecraftのアクセストークンとMSAのリフレッシュトークンはどちらも長大なJWT/不透明文字列
+//! であり、1エントリにまとめると容量制限を超えることがあるため)。
 
 use serde::{Deserialize, Serialize};
 
@@ -24,6 +30,22 @@ impl Provider {
             Provider::Microsoft => "microsoft",
         }
     }
+
+    /// `refresh_token`/`expires_at`/`display_name` を保存する2つ目のエントリのユーザー名。
+    fn keyring_user_meta(self) -> &'static str {
+        match self {
+            Provider::Discord => "discord-meta",
+            Provider::Microsoft => "microsoft-meta",
+        }
+    }
+}
+
+/// `access_token` 以外の付随情報。容量の小さい2つ目のエントリとして保存する。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct TokenMeta {
+    refresh_token: Option<String>,
+    expires_at: Option<i64>,
+    display_name: Option<String>,
 }
 
 /// 保存対象のトークン情報。アクセストークン/リフレッシュトークン/有効期限(UNIX秒)に加え、
@@ -39,10 +61,20 @@ pub struct TokenRecord {
 }
 
 /// トークンを資格情報ストアに保存する(既存エントリは上書き)。
+///
+/// `access_token` と付随情報(`refresh_token`/`expires_at`/`display_name`)を別エントリに
+/// 分割して保存する(理由は本モジュールのドキュメントコメントを参照)。
 pub fn save_token(provider: Provider, record: &TokenRecord) -> Result<(), AuthError> {
     let entry = keyring::Entry::new(SERVICE_NAME, provider.keyring_user())?;
-    let json = serde_json::to_string(record)?;
-    entry.set_password(&json)?;
+    entry.set_password(&record.access_token)?;
+
+    let meta = TokenMeta {
+        refresh_token: record.refresh_token.clone(),
+        expires_at: record.expires_at,
+        display_name: record.display_name.clone(),
+    };
+    let meta_entry = keyring::Entry::new(SERVICE_NAME, provider.keyring_user_meta())?;
+    meta_entry.set_password(&serde_json::to_string(&meta)?)?;
     Ok(())
 }
 
@@ -50,18 +82,41 @@ pub fn save_token(provider: Provider, record: &TokenRecord) -> Result<(), AuthEr
 /// (未サインイン状態は正常なケースであり、エラーとして扱わない)。
 pub fn load_token(provider: Provider) -> Result<Option<TokenRecord>, AuthError> {
     let entry = keyring::Entry::new(SERVICE_NAME, provider.keyring_user())?;
-    match entry.get_password() {
-        Ok(json) => Ok(Some(serde_json::from_str(&json)?)),
-        Err(keyring::Error::NoEntry) => Ok(None),
-        Err(err) => Err(err.into()),
-    }
+    let access_token = match entry.get_password() {
+        Ok(password) => password,
+        Err(keyring::Error::NoEntry) => return Ok(None),
+        Err(err) => return Err(err.into()),
+    };
+
+    let meta_entry = keyring::Entry::new(SERVICE_NAME, provider.keyring_user_meta())?;
+    let meta = match meta_entry.get_password() {
+        Ok(json) => serde_json::from_str::<TokenMeta>(&json)?,
+        // 旧バージョン(分割前)からの移行時など、付随情報エントリが無い場合は空扱いにする。
+        Err(keyring::Error::NoEntry) => TokenMeta::default(),
+        Err(err) => return Err(err.into()),
+    };
+
+    Ok(Some(TokenRecord {
+        access_token,
+        refresh_token: meta.refresh_token,
+        expires_at: meta.expires_at,
+        display_name: meta.display_name,
+    }))
 }
 
 /// 保存済みのトークンを削除する(サインアウト)。エントリが存在しない場合も成功扱いとする。
 pub fn delete_token(provider: Provider) -> Result<(), AuthError> {
     let entry = keyring::Entry::new(SERVICE_NAME, provider.keyring_user())?;
-    match entry.delete_credential() {
+    let primary = match entry.delete_credential() {
         Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-        Err(err) => Err(err.into()),
-    }
+        Err(err) => Err(AuthError::from(err)),
+    };
+
+    let meta_entry = keyring::Entry::new(SERVICE_NAME, provider.keyring_user_meta())?;
+    let meta = match meta_entry.delete_credential() {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(err) => Err(AuthError::from(err)),
+    };
+
+    primary.and(meta)
 }

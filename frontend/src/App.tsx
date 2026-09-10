@@ -1,8 +1,6 @@
 import { useEffect, useState } from "react";
 import {
   FluentProvider,
-  webLightTheme,
-  webDarkTheme,
   makeStyles,
   tokens,
   Title1,
@@ -26,6 +24,7 @@ import {
 } from "@fluentui/react-icons";
 import { invoke } from "@tauri-apps/api/core";
 import { useSystemTheme } from "./useSystemTheme";
+import { trainLightTheme, trainDarkTheme } from "./theme";
 import { HomePage } from "./pages/Home";
 import { ServersPage } from "./pages/Servers";
 import { ProfilesPage } from "./pages/Profiles";
@@ -59,6 +58,16 @@ const useStyles = makeStyles({
     borderBottomStyle: "solid",
     borderBottomColor: tokens.colorNeutralStroke2,
     gap: tokens.spacingHorizontalM,
+  },
+  brand: {
+    display: "flex",
+    alignItems: "center",
+    gap: tokens.spacingHorizontalS,
+  },
+  brandLogo: {
+    height: "32px",
+    width: "32px",
+    borderRadius: tokens.borderRadiusMedium,
   },
   headerActions: {
     display: "flex",
@@ -171,7 +180,16 @@ function AppShell() {
   return (
     <div className={styles.root}>
       <header className={styles.header}>
-        <Title1 as="h1">TRAiN Launcher</Title1>
+        <div className={styles.brand}>
+          <img
+            src="/branding/train-launcher-icon.svg"
+            alt=""
+            className={styles.brandLogo}
+          />
+          <Title1 as="h1" block>
+            TRAiN Launcher
+          </Title1>
+        </div>
         <div className={styles.headerActions}>
           {authStatus.discord_display_name ? (
             <Button appearance="secondary" onClick={handleDiscordSignOut}>
@@ -242,8 +260,9 @@ function AppShell() {
 
 export default function App() {
   // OSのライト/ダーク設定に自動追従する(TODO: 将来的に設定画面から手動上書きできるようにする)。
+  // ブランドカラーはロゴ(assets/branding/train-launcher-logo.svg)に合わせたチール系。
   const scheme = useSystemTheme();
-  const theme = scheme === "dark" ? webDarkTheme : webLightTheme;
+  const theme = scheme === "dark" ? trainDarkTheme : trainLightTheme;
 
   return (
     <FluentProvider theme={theme} style={{ height: "100%" }}>

@@ -9,8 +9,10 @@ import { Body1, Title2 } from "@fluentui/react-components";
 export function SettingsPage() {
   return (
     <div>
-      <Title2 as="h2">設定</Title2>
-      <Body1 as="p">
+      <Title2 as="h2" block>
+        設定
+      </Title2>
+      <Body1 as="p" block>
         アカウント管理、Javaランタイム、ダウンロード先などの設定をここに実装予定です。
       </Body1>
     </div>

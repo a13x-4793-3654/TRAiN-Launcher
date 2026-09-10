@@ -196,8 +196,12 @@ function InstallPanel(props: {
 
   return (
     <div className={styles.section}>
-      <Title3 as="h3">{props.title}</Title3>
-      <Body1 as="p">{props.description}</Body1>
+      <Title3 as="h3" block>
+        {props.title}
+      </Title3>
+      <Body1 as="p" block>
+        {props.description}
+      </Body1>
 
       <div className={styles.form}>
         <Field label="Modrinth / CurseForge のURL" className={styles.urlField}>
@@ -270,7 +274,9 @@ function InstallPanel(props: {
         {installedLoading ? (
           <Spinner size="small" label="読み込み中..." />
         ) : installed.length === 0 ? (
-          <Body1 as="p">導入済みのファイルはありません。</Body1>
+          <Body1 as="p" block>
+            導入済みのファイルはありません。
+          </Body1>
         ) : (
           installed.map((filename) => (
             <Card key={filename}>
@@ -317,12 +323,14 @@ export function ModsPage() {
   const styles = useStyles();
   return (
     <div>
-      <Title2 as="h2">Mod / リソースパック</Title2>
-      <Body1 as="p">
+      <Title2 as="h2" block>
+        Mod / リソースパック
+      </Title2>
+      <Body1 as="p" block>
         Modrinth・CurseForgeのURLを指定してMod・リソースパックを導入します。
         依存Modも自動的に解決してまとめて導入します。
       </Body1>
-      <Caption1 as="p">
+      <Caption1 as="p" block>
         導入先は全プロファイル共通の `.minecraft`
         フォルダです(プロファイルごとの切り替えには未対応)。
       </Caption1>

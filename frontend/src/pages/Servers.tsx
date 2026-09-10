@@ -173,24 +173,30 @@ export function ServersPage() {
 
   return (
     <div>
-      <Title2 as="h2">サーバー</Title2>
-      <Body1 as="p">
+      <Title2 as="h2" block>
+        サーバー
+      </Title2>
+      <Body1 as="p" block>
         Discordでサインインすると、所属しているTRAiNサーバーの設定を自動取得します。
       </Body1>
 
       {authLoading ? (
         <Spinner size="small" label="読み込み中..." />
       ) : !discordSignedIn ? (
-        <Body1 as="p">
+        <Body1 as="p" block>
           Discordでサインインしてください。サインインすると、所属しているTRAiN
           サーバーの一覧が表示されます。
         </Body1>
       ) : serversLoading ? (
         <Spinner size="small" label="サーバー一覧を取得中..." />
       ) : serversError ? (
-        <Body1 as="p">サーバー一覧の取得に失敗しました: {serversError}</Body1>
+        <Body1 as="p" block>
+          サーバー一覧の取得に失敗しました: {serversError}
+        </Body1>
       ) : servers.length === 0 ? (
-        <Body1 as="p">所属しているTRAiNサーバーが見つかりませんでした。</Body1>
+        <Body1 as="p" block>
+          所属しているTRAiNサーバーが見つかりませんでした。
+        </Body1>
       ) : (
         <div className={styles.list}>
           {servers.map((server) => (

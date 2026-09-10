@@ -348,8 +348,10 @@ export function ProfilesPage() {
 
   return (
     <div>
-      <Title2 as="h2">プロファイル</Title2>
-      <Body1 as="p">
+      <Title2 as="h2" block>
+        プロファイル
+      </Title2>
+      <Body1 as="p" block>
         Minecraftのバージョン・起動設定ごとのプロファイルを作成・管理します。
       </Body1>
       <div className={styles.toolbar}>
@@ -366,7 +368,7 @@ export function ProfilesPage() {
       {profilesLoading ? (
         <Spinner size="small" label="読み込み中..." />
       ) : profiles.length === 0 ? (
-        <Body1 as="p">
+        <Body1 as="p" block>
           プロファイルがありません。「新規作成」から追加してください。
         </Body1>
       ) : (

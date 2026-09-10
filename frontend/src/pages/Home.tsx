@@ -9,8 +9,10 @@ import { Body1, Title2 } from "@fluentui/react-components";
 export function HomePage() {
   return (
     <div>
-      <Title2 as="h2">ホーム</Title2>
-      <Body1 as="p">
+      <Title2 as="h2" block>
+        ホーム
+      </Title2>
+      <Body1 as="p" block>
         TRAiN Launcherへようこそ。ここにダッシュボード(最近使ったプロファイル、
         お知らせなど)を表示する予定です。
       </Body1>

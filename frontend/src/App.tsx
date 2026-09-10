@@ -14,16 +14,7 @@ import {
   Toast,
   ToastTitle,
   ToastBody,
-  Dialog,
-  DialogSurface,
-  DialogTitle,
-  DialogBody,
-  DialogContent,
-  DialogActions,
-  DialogTrigger,
   Spinner,
-  Text,
-  Body1Strong,
 } from "@fluentui/react-components";
 import type { SelectTabEventHandler } from "@fluentui/react-components";
 import {
@@ -33,7 +24,6 @@ import {
   SettingsRegular,
 } from "@fluentui/react-icons";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
 import { useSystemTheme } from "./useSystemTheme";
 import { HomePage } from "./pages/Home";
 import { ServersPage } from "./pages/Servers";
@@ -41,7 +31,6 @@ import { ProfilesPage } from "./pages/Profiles";
 import { SettingsPage } from "./pages/Settings";
 
 const TOASTER_ID = "train-launcher-toaster";
-const MSA_DEVICE_CODE_EVENT = "msa://device-code";
 
 interface SignInResult {
   display_name: string;
@@ -50,12 +39,6 @@ interface SignInResult {
 interface AuthStatus {
   discord_display_name: string | null;
   microsoft_display_name: string | null;
-}
-
-interface MsaDeviceCodePayload {
-  verification_uri: string;
-  user_code: string;
-  expires_in_secs: number;
 }
 
 const useStyles = makeStyles({
@@ -98,12 +81,6 @@ const useStyles = makeStyles({
     overflow: "auto",
     padding: tokens.spacingHorizontalXXL,
   },
-  deviceCode: {
-    fontSize: tokens.fontSizeHero800,
-    letterSpacing: "0.2em",
-    textAlign: "center",
-    padding: tokens.spacingVerticalM,
-  },
 });
 
 type NavKey = "home" | "servers" | "profiles" | "settings";
@@ -121,9 +98,6 @@ function AppShell() {
   });
   const [discordSigningIn, setDiscordSigningIn] = useState(false);
   const [microsoftSigningIn, setMicrosoftSigningIn] = useState(false);
-  const [deviceCode, setDeviceCode] = useState<MsaDeviceCodePayload | null>(
-    null,
-  );
 
   const refreshAuthStatus = () => {
     invoke<AuthStatus>("get_auth_status")
@@ -134,17 +108,6 @@ function AppShell() {
   // 起動時に保存済みセッション(keyring)からサインイン状態を復元する。
   useEffect(() => {
     refreshAuthStatus();
-  }, []);
-
-  // MSAデバイスコードフロー中、Rust側から届く verification_uri/user_code を表示する。
-  useEffect(() => {
-    const unlisten = listen<MsaDeviceCodePayload>(
-      MSA_DEVICE_CODE_EVENT,
-      (event) => setDeviceCode(event.payload),
-    );
-    return () => {
-      unlisten.then((fn) => fn());
-    };
   }, []);
 
   const onTabSelect: SelectTabEventHandler = (_event, data) => {
@@ -188,10 +151,7 @@ function AppShell() {
         refreshAuthStatus();
       })
       .catch((err) => notifyError("Microsoft", err))
-      .finally(() => {
-        setMicrosoftSigningIn(false);
-        setDeviceCode(null);
-      });
+      .finally(() => setMicrosoftSigningIn(false));
   };
 
   const handleDiscordSignOut = () => {
@@ -270,42 +230,6 @@ function AppShell() {
         </main>
       </div>
       <Toaster toasterId={TOASTER_ID} />
-      <Dialog open={microsoftSigningIn && deviceCode !== null}>
-        <DialogSurface>
-          <DialogBody>
-            <DialogTitle>Microsoftアカウントでサインイン</DialogTitle>
-            <DialogContent>
-              <Text>
-                ブラウザで以下のURLを開き、表示されたコードを入力してください。
-              </Text>
-              {deviceCode && (
-                <>
-                  <Body1Strong as="p">
-                    {deviceCode.verification_uri}
-                  </Body1Strong>
-                  <div className={styles.deviceCode}>
-                    {deviceCode.user_code}
-                  </div>
-                </>
-              )}
-              <Text>認可が完了するまでこのダイアログは自動的に閉じます。</Text>
-            </DialogContent>
-            <DialogActions>
-              <DialogTrigger disableButtonEnhancement>
-                <Button
-                  appearance="secondary"
-                  onClick={() => {
-                    setMicrosoftSigningIn(false);
-                    setDeviceCode(null);
-                  }}
-                >
-                  キャンセル(表示を閉じる)
-                </Button>
-              </DialogTrigger>
-            </DialogActions>
-          </DialogBody>
-        </DialogSurface>
-      </Dialog>
     </div>
   );
 }

@@ -6,8 +6,11 @@
 //! 実際にサインインを試すには Microsoft Entra ID / Discord Developer Portal でのアプリ登録と、
 //! 対応する環境変数(`TRAIN_LAUNCHER_MS_CLIENT_ID` 等、詳細はREADME参照)の設定が必要。
 
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
 use serde::Serialize;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use tauri_plugin_opener::OpenerExt;
 use train_launcher_auth::store::{self, Provider, TokenRecord};
 use train_launcher_auth::{config, discord, msa, xbox};
@@ -16,17 +19,6 @@ use train_launcher_auth::{config, discord, msa, xbox};
 #[derive(Debug, Clone, Serialize)]
 struct SignInResult {
     display_name: String,
-}
-
-/// MSAデバイスコードフロー中にフロントエンドへemitするイベント名。
-const MSA_DEVICE_CODE_EVENT: &str = "msa://device-code";
-
-/// フロントエンドへemitするMSAデバイスコード情報(verification_uri/user_code)。
-#[derive(Debug, Clone, Serialize)]
-struct MsaDeviceCodePayload {
-    verification_uri: String,
-    user_code: String,
-    expires_in_secs: u64,
 }
 
 /// Discordでサインインする。
@@ -55,6 +47,7 @@ async fn sign_in_with_discord(app_handle: AppHandle) -> Result<SignInResult, Str
             refresh_token: token.refresh_token.clone(),
             expires_at: token.expires_at,
             display_name: Some(token.username.clone()),
+            uuid: None,
         },
     )
     .map_err(|err| err.to_string())?;
@@ -64,28 +57,109 @@ async fn sign_in_with_discord(app_handle: AppHandle) -> Result<SignInResult, Str
     })
 }
 
+/// 埋め込みWebViewのMSAサインインポップアップの結果。
+enum MsaSignInOutcome {
+    /// リダイレクトから認可コード/stateを取得できた。
+    Code { code: String, state: String },
+    /// ユーザーがポップアップを閉じた(またはタイムアウト前に破棄された)。
+    Cancelled,
+    /// Microsoft側がエラーを返した(例: ユーザーが同意画面でキャンセルした場合の `access_denied`)。
+    Error(String),
+}
+
+/// MSAサインイン用の埋め込みWebViewポップアップ("msa-signin"というラベルのウィンドウ)を開き、
+/// [`msa::MSA_NATIVE_CLIENT_REDIRECT_URI`] へのナビゲーションを監視して結果を待つ。
+///
+/// Minecraft公式ランチャーと同様の、システムブラウザを介さないポップアップ型サインインUXを
+/// 実現するための実装。リダイレクト先への実際のHTTPリクエストは発生させず(`on_navigation`が
+/// `false` を返してナビゲーションをブロックする)、URLに含まれる `code`/`state`/`error` クエリ
+/// パラメータのみを横取りする。
+async fn open_msa_signin_popup(
+    app_handle: &AppHandle,
+    authorize_url: &str,
+) -> Result<MsaSignInOutcome, String> {
+    let url = authorize_url
+        .parse::<tauri::Url>()
+        .map_err(|err| format!("invalid authorize url: {err}"))?;
+
+    let (tx, rx) = tokio::sync::oneshot::channel::<MsaSignInOutcome>();
+    let tx = Arc::new(Mutex::new(Some(tx)));
+
+    let tx_navigation = tx.clone();
+    let window = WebviewWindowBuilder::new(app_handle, "msa-signin", WebviewUrl::External(url))
+        .title("Microsoftアカウントでサインイン")
+        .inner_size(500.0, 650.0)
+        .on_navigation(move |nav_url| {
+            let nav_str = nav_url.as_str();
+            if !nav_str.starts_with(msa::MSA_NATIVE_CLIENT_REDIRECT_URI) {
+                return true;
+            }
+            if let Some(sender) = tx_navigation.lock().unwrap().take() {
+                let mut code = None;
+                let mut state = None;
+                let mut error = None;
+                for (key, value) in nav_url.query_pairs() {
+                    match key.as_ref() {
+                        "code" => code = Some(value.into_owned()),
+                        "state" => state = Some(value.into_owned()),
+                        "error_description" | "error" => error = Some(value.into_owned()),
+                        _ => {}
+                    }
+                }
+                let outcome = match (code, state, error) {
+                    (Some(code), Some(state), _) => MsaSignInOutcome::Code { code, state },
+                    (_, _, Some(error)) => MsaSignInOutcome::Error(error),
+                    _ => MsaSignInOutcome::Error("認可コードを取得できませんでした".to_string()),
+                };
+                let _ = sender.send(outcome);
+            }
+            false
+        })
+        .build()
+        .map_err(|err| err.to_string())?;
+
+    let tx_close = tx.clone();
+    window.on_window_event(move |event| {
+        if let WindowEvent::Destroyed = event {
+            if let Some(sender) = tx_close.lock().unwrap().take() {
+                let _ = sender.send(MsaSignInOutcome::Cancelled);
+            }
+        }
+    });
+
+    let outcome = tokio::time::timeout(Duration::from_secs(300), rx)
+        .await
+        .map_err(|_| "サインインがタイムアウトしました".to_string())?
+        .unwrap_or(MsaSignInOutcome::Cancelled);
+
+    // 認可コード取得済みの場合、ポップアップはまだ開いたままなので明示的に閉じる
+    // (すでに閉じられている場合は失敗しても無視して問題ない)。
+    let _ = window.close();
+
+    Ok(outcome)
+}
+
 /// Microsoftアカウント(MSA)でサインインする。
 ///
-/// 環境変数 `TRAIN_LAUNCHER_MS_CLIENT_ID` が必要。デバイスコードフローのため、
-/// verification_uri/user_codeを `msa://device-code` イベントでフロントエンドへ通知し、
-/// ユーザーがブラウザ側で認可するのを待つ。MSAトークン取得後、続けてXboxLive/XSTSを経由して
-/// Minecraftトークンへ変換し、Minecraftプレイヤー名を取得する。
+/// 環境変数 `TRAIN_LAUNCHER_MS_CLIENT_ID` が必要。Minecraft公式ランチャーと同様、埋め込み
+/// WebViewのポップアップでMicrosoftのサインイン画面を表示する(認可コードフロー + PKCE)。
+/// MSAトークン取得後、続けてXboxLive/XSTSを経由してMinecraftトークンへ変換し、
+/// Minecraftプレイヤー名/UUIDを取得する。
 #[tauri::command]
 async fn sign_in_with_microsoft(app_handle: AppHandle) -> Result<SignInResult, String> {
     let config = config::MicrosoftConfig::from_env().map_err(|err| err.to_string())?;
+    let request = msa::build_authorization_request(&config);
 
-    let msa_token = msa::sign_in(&config, move |info| {
-        let payload = MsaDeviceCodePayload {
-            verification_uri: info.verification_uri,
-            user_code: info.user_code,
-            expires_in_secs: info.expires_in_secs,
-        };
-        if let Err(err) = app_handle.emit(MSA_DEVICE_CODE_EVENT, payload) {
-            eprintln!("failed to emit MSA device code event: {err}");
-        }
-    })
-    .await
-    .map_err(|err| err.to_string())?;
+    let outcome = open_msa_signin_popup(&app_handle, &request.authorize_url).await?;
+    let (code, state) = match outcome {
+        MsaSignInOutcome::Code { code, state } => (code, state),
+        MsaSignInOutcome::Cancelled => return Err("サインインがキャンセルされました".to_string()),
+        MsaSignInOutcome::Error(message) => return Err(message),
+    };
+
+    let msa_token = msa::exchange_authorization_code(&config, request, code, state)
+        .await
+        .map_err(|err| err.to_string())?;
 
     let minecraft_token = xbox::exchange_microsoft_token(&msa_token.access_token)
         .await
@@ -103,6 +177,7 @@ async fn sign_in_with_microsoft(app_handle: AppHandle) -> Result<SignInResult, S
             refresh_token: msa_token.refresh_token,
             expires_at: msa_token.expires_at,
             display_name: Some(display_name.clone()),
+            uuid: minecraft_token.uuid,
         },
     )
     .map_err(|err| err.to_string())?;
@@ -171,12 +246,153 @@ async fn list_member_servers() -> Result<Vec<String>, String> {
 
 /// URL指定でModを解決する(スタブ、Modrinth経由)。
 ///
-/// TODO: `train_launcher_mods` の実装完了後、依存Modも含めた解決結果を返す。
+/// TODO: `train_launcher_mods` の実装完了後、依存Modも含めた依存関係も返す。
 #[tauri::command]
 async fn resolve_mod_url(url: String) -> Result<(), String> {
     train_launcher_mods::modrinth::resolve_from_url(&url)
         .await
         .map_err(|err| err.to_string())
+}
+
+/// ゲーム終了時にフロントエンドへemitするイベント名。
+const GAME_EXITED_EVENT: &str = "game://exited";
+
+/// フロントエンドへemitするゲーム終了情報。
+#[derive(Debug, Clone, Serialize)]
+struct GameExitedPayload {
+    /// プロセスの終了コード。強制終了などで取得できない場合は `None`。
+    exit_code: Option<i32>,
+}
+
+/// ダウンロード/起動の進行状況をフロントエンドへemitするイベント名。
+const LAUNCH_PROGRESS_EVENT: &str = "launch://progress";
+
+/// フロントエンドへemitする進行状況情報。
+///
+/// `phase` はフロントエンド側での分岐用の機械可読な識別子、`phase_label` は
+/// そのまま画面に表示できる日本語ラベル。`total` が0の場合は件数未確定を表す。
+#[derive(Debug, Clone, Serialize)]
+struct LaunchProgressPayload {
+    phase: &'static str,
+    phase_label: String,
+    completed: usize,
+    total: usize,
+}
+
+impl From<train_launcher_core::download::DownloadProgress> for LaunchProgressPayload {
+    fn from(progress: train_launcher_core::download::DownloadProgress) -> Self {
+        use train_launcher_core::download::DownloadPhase;
+        let (phase, base_label) = match progress.phase {
+            DownloadPhase::FetchingManifest => ("fetching_manifest", "バージョン情報を確認中"),
+            DownloadPhase::ClientJar => ("client_jar", "クライアント本体をダウンロード中"),
+            DownloadPhase::Libraries => ("libraries", "ライブラリをダウンロード中"),
+            DownloadPhase::Assets => ("assets", "アセットをダウンロード中"),
+        };
+        let phase_label = if progress.total > 0 {
+            format!("{base_label} ({}/{})", progress.completed, progress.total)
+        } else {
+            base_label.to_string()
+        };
+        LaunchProgressPayload {
+            phase,
+            phase_label,
+            completed: progress.completed,
+            total: progress.total,
+        }
+    }
+}
+
+/// 指定バージョンのMinecraftをダウンロード(未取得分のみ)した上で起動する。
+///
+/// Minecraft自体の起動にはMicrosoftアカウントでのサインインが必須(Discordサインインのみ
+/// では起動できない)。ダウンロードは初回のみ発生し、2回目以降はSHA1が一致するファイルは
+/// スキップされる。ダウンロード・起動の進行状況は `launch://progress` イベントで随時
+/// フロントエンドへ通知する。起動後はプロセスの終了を待たずに即座に制御を返し、終了時に
+/// `game://exited` イベントをフロントエンドへemitする。
+///
+/// ゲームデータは公式Minecraft Launcherと共有するディレクトリ
+/// (`train_launcher_core::paths::default_minecraft_root`、`.minecraft` 相当)に保存する。
+#[tauri::command]
+async fn launch_minecraft(app_handle: AppHandle, version_id: String) -> Result<(), String> {
+    let token = store::load_token(Provider::Microsoft)
+        .map_err(|err| err.to_string())?
+        .ok_or_else(|| "Microsoftアカウントでサインインしてください".to_string())?;
+    let uuid = token.uuid.clone().ok_or_else(|| {
+        "MinecraftのUUIDが取得できていません。サインアウトして再度サインインしてください"
+            .to_string()
+    })?;
+    let username = token
+        .display_name
+        .clone()
+        .unwrap_or_else(|| "Player".to_string());
+
+    // 公式Minecraft Launcherと同じ `.minecraft` 相当のディレクトリを共有する
+    // (二重ダウンロードを避け、どちらのランチャーからでも同じファイルを再利用できるようにする)。
+    let launcher_root = train_launcher_core::paths::default_minecraft_root();
+
+    let progress_handle = app_handle.clone();
+    let on_progress: train_launcher_core::download::ProgressCallback =
+        std::sync::Arc::new(move |progress| {
+            let payload = LaunchProgressPayload::from(progress);
+            if let Err(err) = progress_handle.emit(LAUNCH_PROGRESS_EVENT, payload) {
+                eprintln!("failed to emit launch progress event: {err}");
+            }
+        });
+
+    train_launcher_core::download::download_version_files(&version_id, &launcher_root, on_progress)
+        .await
+        .map_err(|err| err.to_string())?;
+
+    let _ = app_handle.emit(
+        LAUNCH_PROGRESS_EVENT,
+        LaunchProgressPayload {
+            phase: "launching",
+            phase_label: "起動中...".to_string(),
+            completed: 0,
+            total: 0,
+        },
+    );
+
+    let profile = train_launcher_core::profile::Profile {
+        id: version_id.clone(),
+        name: version_id.clone(),
+        minecraft_version: version_id,
+        mod_loader: None,
+        server_id: None,
+        java_path: None,
+        max_memory_mb: None,
+    };
+    let auth = train_launcher_core::launch::LaunchAuth {
+        username,
+        uuid,
+        access_token: token.access_token,
+    };
+
+    let mut child = train_launcher_core::launch::launch(&profile, &launcher_root, &auth)
+        .await
+        .map_err(|err| err.to_string())?;
+
+    let _ = app_handle.emit(
+        LAUNCH_PROGRESS_EVENT,
+        LaunchProgressPayload {
+            phase: "launched",
+            phase_label: "起動しました".to_string(),
+            completed: 1,
+            total: 1,
+        },
+    );
+
+    tauri::async_runtime::spawn(async move {
+        let exit_code = match child.wait().await {
+            Ok(status) => status.code(),
+            Err(_) => None,
+        };
+        if let Err(err) = app_handle.emit(GAME_EXITED_EVENT, GameExitedPayload { exit_code }) {
+            eprintln!("failed to emit game exited event: {err}");
+        }
+    });
+
+    Ok(())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -192,6 +408,7 @@ pub fn run() {
             list_profiles,
             list_member_servers,
             resolve_mod_url,
+            launch_minecraft,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

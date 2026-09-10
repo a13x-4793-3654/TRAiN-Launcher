@@ -21,6 +21,7 @@ import {
   HomeRegular,
   ServerRegular,
   PersonRegular,
+  AppsRegular,
   SettingsRegular,
 } from "@fluentui/react-icons";
 import { invoke } from "@tauri-apps/api/core";
@@ -28,6 +29,7 @@ import { useSystemTheme } from "./useSystemTheme";
 import { HomePage } from "./pages/Home";
 import { ServersPage } from "./pages/Servers";
 import { ProfilesPage } from "./pages/Profiles";
+import { ModsPage } from "./pages/Mods";
 import { SettingsPage } from "./pages/Settings";
 
 const TOASTER_ID = "train-launcher-toaster";
@@ -83,7 +85,7 @@ const useStyles = makeStyles({
   },
 });
 
-type NavKey = "home" | "servers" | "profiles" | "settings";
+type NavKey = "home" | "servers" | "profiles" | "mods" | "settings";
 
 // TODO: サインイン実装後、この4画面に加えて「所属サーバー詳細」「Mod導入ウィザード」等の
 // サブ画面を追加する。現時点ではプレースホルダーの切り替えのみ。
@@ -217,6 +219,9 @@ function AppShell() {
             <Tab value="profiles" icon={<PersonRegular />}>
               プロファイル
             </Tab>
+            <Tab value="mods" icon={<AppsRegular />}>
+              Mod / リソースパック
+            </Tab>
             <Tab value="settings" icon={<SettingsRegular />}>
               設定
             </Tab>
@@ -226,6 +231,7 @@ function AppShell() {
           {selected === "home" && <HomePage />}
           {selected === "servers" && <ServersPage />}
           {selected === "profiles" && <ProfilesPage />}
+          {selected === "mods" && <ModsPage />}
           {selected === "settings" && <SettingsPage />}
         </main>
       </div>

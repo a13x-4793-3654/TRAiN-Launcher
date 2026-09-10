@@ -79,6 +79,20 @@ npm run dev
 
 > **注意**: この開発環境には実際のMicrosoft Entra ID / Discord Developer Portal のアプリ登録がないため、エンドツーエンドのサインイン動作確認は行えていません。ビルド成功・ユニットテスト(設定読み込み・URL構築ロジック)の確認までを実施済みです。実際の登録情報を用意できる環境で動作確認を行ってください。
 
+### Mod / リソースパック導入機能を試すための環境変数
+
+Modrinth のURLはAPIキー不要で解決できますが、CurseForgeのURLを解決・導入するにはAPIキーが必要です。
+
+| 環境変数 | 必須 | 説明 |
+| --- | --- | --- |
+| `TRAIN_LAUNCHER_CURSEFORGE_API_KEY` | CurseForgeのURLを使う場合のみ必須(Modrinthのみなら不要) | [CurseForge Console](https://console.curseforge.com/#/api-keys) で発行するAPIキー |
+
+例(PowerShellで `cargo tauri dev` の前に設定):
+```powershell
+$env:TRAIN_LAUNCHER_CURSEFORGE_API_KEY = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+npm run dev
+```
+
 ### ワークスペース構成
 
 ```

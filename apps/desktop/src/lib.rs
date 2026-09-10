@@ -255,29 +255,206 @@ async fn list_minecraft_versions(
         .map_err(|err| err.to_string())
 }
 
-/// Discordサインイン後の所属サーバー一覧を取得する(スタブ、モック実装を使用)。
+/// Discordサインイン後の所属サーバー一覧を取得する(TRAiN API未実装のため、モック実装を使用)。
 ///
 /// TODO: TRAiN API仕様確定後、`MockTrainApiClient` を実際のHTTPクライアント実装に置き換える。
 #[tauri::command]
-async fn list_member_servers() -> Result<Vec<String>, String> {
+async fn list_member_servers() -> Result<Vec<train_launcher_server_api::MemberServer>, String> {
     use train_launcher_server_api::{MockTrainApiClient, TrainApiClient};
+
+    let discord_token = store::load_token(Provider::Discord)
+        .map_err(|err| err.to_string())?
+        .ok_or_else(|| "Discordアカウントでサインインしてください".to_string())?;
+    // TODO: TRAiN API仕様確定後、Discordの実ユーザーIDをトークンに保持して使用する
+    // (現状は表示名を仮のユーザー識別子として使っている)。
+    let discord_user_id = discord_token.display_name.unwrap_or_default();
 
     let client = MockTrainApiClient;
     client
-        .get_member_servers("mock-discord-user")
+        .get_member_servers(&discord_user_id)
         .await
-        .map(|servers| servers.into_iter().map(|s| s.name).collect())
         .map_err(|err| err.to_string())
 }
 
-/// URL指定でModを解決する(スタブ、Modrinth経由)。
+/// フロントエンドへ返す、解決済みMod/リソースパックファイルの情報。
+#[derive(Debug, Clone, Serialize)]
+struct ResolvedModPayload {
+    provider: String,
+    project_name: String,
+    filename: String,
+    /// リクエストされたURL自体が解決された結果は `false`、依存関係として解決された
+    /// 結果は `true`。
+    is_dependency: bool,
+}
+
+impl From<(bool, train_launcher_mods::resolver::ResolvedFile)> for ResolvedModPayload {
+    fn from((is_dependency, resolved): (bool, train_launcher_mods::resolver::ResolvedFile)) -> Self {
+        let provider = match resolved.provider {
+            train_launcher_mods::resolver::ModProvider::Modrinth => "modrinth",
+            train_launcher_mods::resolver::ModProvider::CurseForge => "curseforge",
+        };
+        ResolvedModPayload {
+            provider: provider.to_string(),
+            project_name: resolved.project_name,
+            filename: resolved.filename,
+            is_dependency,
+        }
+    }
+}
+
+/// 現在設定されているCurseForge APIキー(環境変数から読み込み、未設定なら `None`)。
 ///
-/// TODO: `train_launcher_mods` の実装完了後、依存Modも含めた依存関係も返す。
-#[tauri::command]
-async fn resolve_mod_url(url: String) -> Result<(), String> {
-    train_launcher_mods::modrinth::resolve_from_url(&url)
+/// CurseForgeのURLを解決する場合にのみ必要。Modrinthのみで完結する場合は不要。
+fn optional_curseforge_api_key() -> Option<String> {
+    train_launcher_mods::config::curseforge_api_key_from_env().ok()
+}
+
+/// 指定ディレクトリ内のファイル名一覧を返す(ディレクトリが存在しない場合は空リスト)。
+async fn list_directory_files(dir: &std::path::Path) -> Result<Vec<String>, String> {
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut entries = tokio::fs::read_dir(dir).await.map_err(|err| err.to_string())?;
+    let mut filenames = Vec::new();
+    while let Some(entry) = entries.next_entry().await.map_err(|err| err.to_string())? {
+        if entry.file_type().await.map(|ft| ft.is_file()).unwrap_or(false) {
+            if let Some(name) = entry.file_name().to_str() {
+                filenames.push(name.to_string());
+            }
+        }
+    }
+    filenames.sort();
+    Ok(filenames)
+}
+
+/// 指定ディレクトリ内のファイルを削除する。パストラバーサル対策として、`filename` に
+/// 区切り文字(`/`、`\`)や `..` が含まれる場合はエラーを返す。
+async fn remove_installed_file(dir: &std::path::Path, filename: &str) -> Result<(), String> {
+    if filename.contains('/') || filename.contains('\\') || filename.contains("..") {
+        return Err("不正なファイル名です".to_string());
+    }
+    tokio::fs::remove_file(dir.join(filename))
         .await
         .map_err(|err| err.to_string())
+}
+
+/// URL指定でModを解決する(プレビューのみ、ダウンロードは行わない)。
+///
+/// 依存関係(`Required`)も再帰的に解決し、リクエストしたMod自身を先頭とした一覧を返す。
+#[tauri::command]
+async fn resolve_mod_url(
+    url: String,
+    minecraft_version: Option<String>,
+) -> Result<Vec<ResolvedModPayload>, String> {
+    use train_launcher_mods::resolver::{resolve_dependencies, ModReference, ResolveFilter};
+
+    let filter = ResolveFilter {
+        minecraft_version,
+        mod_loader: None,
+    };
+    let resolved = resolve_dependencies(
+        vec![ModReference { url }],
+        &filter,
+        optional_curseforge_api_key().as_deref(),
+    )
+    .await
+    .map_err(|err| err.to_string())?;
+
+    Ok(resolved
+        .into_iter()
+        .enumerate()
+        .map(|(index, file)| ResolvedModPayload::from((index > 0, file)))
+        .collect())
+}
+
+/// URL指定でModをインストールする(依存Modも含めてダウンロードする)。
+///
+/// インストール先は公式Minecraft Launcherと共有する `.minecraft/mods` ディレクトリ。
+/// **注意**: 現時点ではプロファイルごとに独立したゲームディレクトリを持たないため、
+/// インストールしたModは全プロファイル共通で適用される。
+#[tauri::command]
+async fn install_mod(
+    url: String,
+    minecraft_version: Option<String>,
+) -> Result<Vec<String>, String> {
+    use train_launcher_mods::resolver::{
+        download_resolved_file, resolve_dependencies, ModReference, ResolveFilter,
+    };
+
+    let filter = ResolveFilter {
+        minecraft_version,
+        mod_loader: None,
+    };
+    let resolved = resolve_dependencies(
+        vec![ModReference { url }],
+        &filter,
+        optional_curseforge_api_key().as_deref(),
+    )
+    .await
+    .map_err(|err| err.to_string())?;
+
+    let dest_dir = train_launcher_core::paths::default_minecraft_root().join("mods");
+    let mut installed = Vec::new();
+    for file in &resolved {
+        download_resolved_file(file, &dest_dir)
+            .await
+            .map_err(|err| err.to_string())?;
+        installed.push(file.filename.clone());
+    }
+    Ok(installed)
+}
+
+/// インストール済みMod(`.minecraft/mods` 直下のファイル)一覧を返す。
+#[tauri::command]
+async fn list_installed_mods() -> Result<Vec<String>, String> {
+    let dir = train_launcher_core::paths::default_minecraft_root().join("mods");
+    list_directory_files(&dir).await
+}
+
+/// インストール済みModを削除する。
+#[tauri::command]
+async fn remove_installed_mod(filename: String) -> Result<(), String> {
+    let dir = train_launcher_core::paths::default_minecraft_root().join("mods");
+    remove_installed_file(&dir, &filename).await
+}
+
+/// URL指定でリソースパックをインストールする。
+///
+/// インストール先は公式Minecraft Launcherと共有する `.minecraft/resourcepacks` ディレクトリ。
+#[tauri::command]
+async fn install_resource_pack(
+    url: String,
+    minecraft_version: Option<String>,
+) -> Result<String, String> {
+    let dest_dir = train_launcher_core::paths::default_minecraft_root().join("resourcepacks");
+    let path = train_launcher_mods::resource_pack::install_from_url(
+        &url,
+        minecraft_version.as_deref(),
+        optional_curseforge_api_key().as_deref(),
+        &dest_dir,
+    )
+    .await
+    .map_err(|err| err.to_string())?;
+
+    Ok(path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default()
+        .to_string())
+}
+
+/// インストール済みリソースパック(`.minecraft/resourcepacks` 直下のファイル)一覧を返す。
+#[tauri::command]
+async fn list_installed_resource_packs() -> Result<Vec<String>, String> {
+    let dir = train_launcher_core::paths::default_minecraft_root().join("resourcepacks");
+    list_directory_files(&dir).await
+}
+
+/// インストール済みリソースパックを削除する。
+#[tauri::command]
+async fn remove_installed_resource_pack(filename: String) -> Result<(), String> {
+    let dir = train_launcher_core::paths::default_minecraft_root().join("resourcepacks");
+    remove_installed_file(&dir, &filename).await
 }
 
 /// ゲーム終了時にフロントエンドへemitするイベント名。
@@ -328,7 +505,8 @@ impl From<train_launcher_core::download::DownloadProgress> for LaunchProgressPay
     }
 }
 
-/// 指定プロファイルのMinecraftをダウンロード(未取得分のみ)した上で起動する。
+/// プロファイルを指定してMinecraftをダウンロード(未取得分のみ)した上で起動する
+/// (`launch_minecraft`/`join_train_server` 共通の実装)。
 ///
 /// Minecraft自体の起動にはMicrosoftアカウントでのサインインが必須(Discordサインインのみ
 /// では起動できない)。ダウンロードは初回のみ発生し、2回目以降はSHA1が一致するファイルは
@@ -338,8 +516,10 @@ impl From<train_launcher_core::download::DownloadProgress> for LaunchProgressPay
 ///
 /// ゲームデータは公式Minecraft Launcherと共有するディレクトリ
 /// (`train_launcher_core::paths::default_minecraft_root`、`.minecraft` 相当)に保存する。
-#[tauri::command]
-async fn launch_minecraft(app_handle: AppHandle, profile_id: String) -> Result<(), String> {
+async fn launch_profile(
+    app_handle: AppHandle,
+    profile: train_launcher_core::profile::Profile,
+) -> Result<(), String> {
     let token = store::load_token(Provider::Microsoft)
         .map_err(|err| err.to_string())?
         .ok_or_else(|| "Microsoftアカウントでサインインしてください".to_string())?;
@@ -351,9 +531,6 @@ async fn launch_minecraft(app_handle: AppHandle, profile_id: String) -> Result<(
         .display_name
         .clone()
         .unwrap_or_else(|| "Player".to_string());
-
-    let profile =
-        train_launcher_core::profile::get_profile(&profile_id).map_err(|err| err.to_string())?;
 
     // 公式Minecraft Launcherと同じ `.minecraft` 相当のディレクトリを共有する
     // (二重ダウンロードを避け、どちらのランチャーからでも同じファイルを再利用できるようにする)。
@@ -419,6 +596,131 @@ async fn launch_minecraft(app_handle: AppHandle, profile_id: String) -> Result<(
     Ok(())
 }
 
+/// 指定プロファイルのMinecraftをダウンロード(未取得分のみ)した上で起動する。
+#[tauri::command]
+async fn launch_minecraft(app_handle: AppHandle, profile_id: String) -> Result<(), String> {
+    let profile =
+        train_launcher_core::profile::get_profile(&profile_id).map_err(|err| err.to_string())?;
+    launch_profile(app_handle, profile).await
+}
+
+/// TRAiN管理サーバーへ参加する。
+///
+/// サーバー設定(`ServerConfig`、接続先/Minecraftバージョン/Modローダー/Mod・リソースパック
+/// URL一覧)をTRAiN APIから取得し、そのサーバー専用のプロファイルを自動作成/更新した上で、
+/// 指定されたMod・リソースパックを依存関係含めて解決・インストールし、最後に起動する。
+/// 同じサーバーに再度参加した場合は、既存の同名プロファイルを更新する(サーバー側の
+/// バージョン/Mod構成の変更を追従させるため)。
+#[tauri::command]
+async fn join_train_server(
+    app_handle: AppHandle,
+    server_id: String,
+    server_name: String,
+) -> Result<(), String> {
+    use train_launcher_core::profile::{Profile, ProfileSource};
+    use train_launcher_mods::resolver::{
+        download_resolved_file, resolve_dependencies, ModReference, ResolveFilter,
+    };
+    use train_launcher_server_api::{MockTrainApiClient, TrainApiClient};
+
+    let _ = app_handle.emit(
+        LAUNCH_PROGRESS_EVENT,
+        LaunchProgressPayload {
+            phase: "fetching_server_config",
+            phase_label: "サーバー設定を取得中...".to_string(),
+            completed: 0,
+            total: 0,
+        },
+    );
+
+    let client = MockTrainApiClient;
+    let server_config = client
+        .get_server_config(&server_id)
+        .await
+        .map_err(|err| err.to_string())?;
+
+    // サーバーごとに固定のプロファイルIDを使う(再度参加した場合は同じプロファイルを更新し、
+    // サーバー側の設定変更をそのまま反映する)。
+    let profile = Profile {
+        id: format!("train-{server_id}"),
+        name: server_name,
+        minecraft_version: server_config.minecraft_version.clone(),
+        mod_loader: server_config.mod_loader.clone(),
+        server_id: Some(server_id),
+        java_path: None,
+        max_memory_mb: None,
+        source: ProfileSource::Train,
+    };
+    match train_launcher_core::profile::create_profile(profile.clone()) {
+        Ok(()) => {}
+        Err(train_launcher_core::CoreError::ProfileAlreadyExists(_)) => {
+            train_launcher_core::profile::update_profile(profile.clone())
+                .map_err(|err| err.to_string())?;
+        }
+        Err(err) => return Err(err.to_string()),
+    }
+
+    let filter = ResolveFilter {
+        minecraft_version: Some(server_config.minecraft_version.clone()),
+        mod_loader: server_config.mod_loader.clone(),
+    };
+    let curseforge_api_key = optional_curseforge_api_key();
+
+    if !server_config.mod_urls.is_empty() {
+        let references = server_config
+            .mod_urls
+            .iter()
+            .map(|url| ModReference { url: url.clone() })
+            .collect();
+        let resolved = resolve_dependencies(references, &filter, curseforge_api_key.as_deref())
+            .await
+            .map_err(|err| err.to_string())?;
+
+        let dest_dir = train_launcher_core::paths::default_minecraft_root().join("mods");
+        let total = resolved.len();
+        for (index, file) in resolved.iter().enumerate() {
+            let _ = app_handle.emit(
+                LAUNCH_PROGRESS_EVENT,
+                LaunchProgressPayload {
+                    phase: "installing_mods",
+                    phase_label: format!("Modを導入中({}/{total})", index + 1),
+                    completed: index,
+                    total,
+                },
+            );
+            download_resolved_file(file, &dest_dir)
+                .await
+                .map_err(|err| err.to_string())?;
+        }
+    }
+
+    if !server_config.resource_pack_urls.is_empty() {
+        let dest_dir = train_launcher_core::paths::default_minecraft_root().join("resourcepacks");
+        let total = server_config.resource_pack_urls.len();
+        for (index, url) in server_config.resource_pack_urls.iter().enumerate() {
+            let _ = app_handle.emit(
+                LAUNCH_PROGRESS_EVENT,
+                LaunchProgressPayload {
+                    phase: "installing_resource_packs",
+                    phase_label: format!("リソースパックを導入中({}/{total})", index + 1),
+                    completed: index,
+                    total,
+                },
+            );
+            train_launcher_mods::resource_pack::install_from_url(
+                url,
+                Some(&server_config.minecraft_version),
+                curseforge_api_key.as_deref(),
+                &dest_dir,
+            )
+            .await
+            .map_err(|err| err.to_string())?;
+        }
+    }
+
+    launch_profile(app_handle, profile).await
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -436,7 +738,14 @@ pub fn run() {
             list_minecraft_versions,
             list_member_servers,
             resolve_mod_url,
+            install_mod,
+            list_installed_mods,
+            remove_installed_mod,
+            install_resource_pack,
+            list_installed_resource_packs,
+            remove_installed_resource_pack,
             launch_minecraft,
+            join_train_server,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

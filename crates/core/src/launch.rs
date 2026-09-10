@@ -134,18 +134,12 @@ fn build_classpath(
         if !rules_allow(&library.rules, platform) {
             continue;
         }
-        let Some(downloads) = &library.downloads else {
-            continue;
-        };
-        // 展開して java.library.path 経由で読み込むレガシーネイティブ(classifiers専用)は
-        // クラスパスには含めない。通常の `artifact` を持つライブラリのみ対象。
-        if let Some(artifact) = &downloads.artifact {
-            let path = artifact
-                .path
-                .as_ref()
-                .map(|p| paths.library_path(p))
-                .ok_or_else(|| CoreError::InvalidLibraryName(library.name.clone()))?;
-            entries.push(path.display().to_string());
+        // Mojang形式(`downloads.artifact`)・Fabric/Quilt/Forge等が生成するフラット形式
+        // (トップレベルの `url`)の両方に対応する。展開して java.library.path 経由で
+        // 読み込むレガシーネイティブ(classifiers専用)は対象外([`maven::resolve_library_artifact`]
+        // がこれらは `None` を返す)。
+        if let Some(resolved) = crate::maven::resolve_library_artifact(library)? {
+            entries.push(paths.library_path(&resolved.relative_path).display().to_string());
         }
     }
 

@@ -16,7 +16,10 @@ TRAiN Launcher は、TRAiN 管理下のサーバーに参加しているユー�
 
 ### プロファイル / Mod 管理
 
-- Fabric などの前提Modローダーの導入をサポート
+- **Fabric / Quilt / Forge / NeoForge** の前提Modローダーをプロファイルの設定だけで自動導入(未導入の場合のみ実行され、既に導入済みなら再導入はしない)
+  - Fabric / Quilt は公式Meta APIから完全なバージョン情報を取得して導入
+  - Forge / NeoForge は公式インストーラjarをダウンロードし、ヘッドレスモードで実行して導入(GUIは表示されない)
+  - ローダーバージョンを指定しない場合は安定版の最新(Forge/NeoForgeは推奨版)を自動選択
 - プロファイルごとに Mod の取得元 URL (Modrinth / CurseForge など) を入力するだけで、自動的に取得・設置
 - 前提Mod(依存Mod)を自動的に解決し、依存関係も含めて自動インストールすることで、ユーザーが個別に依存関係を調べて導入する手間をなくす
 - リソースパックについても Mod と同様の仕組みで URL 指定による自動導入に対応
@@ -123,7 +126,8 @@ frontend/          # React + Vite + TypeScript + Fluent UI React v9 (`@fluentui/
 
 ### 補足
 
-- MSA/Discord 認証フロー(`crates/auth`)、Minecraft本体の起動処理(Fabric/Forge等Modローダー導入済みプロファイルの起動含む)、Mod 依存解決・ダウンロード(`crates/mods`)は実装済みです。TRAiN 独自APIはHTTPクライアント実装済みですが、実際のAPI仕様が未確定のためエンドポイント形式は暫定です(`TRAIN_LAUNCHER_API_BASE_URL` 参照)
+- MSA/Discord 認証フロー(`crates/auth`)、Minecraft本体の起動処理(`crates/core`、Fabric/Quilt/Forge/NeoForgeの自動導入込み)、Mod 依存解決・ダウンロード(`crates/mods`)は実装済みです。TRAiN 独自APIはHTTPクライアント実装済みですが、実際のAPI仕様が未確定のためエンドポイント形式は暫定です(`TRAIN_LAUNCHER_API_BASE_URL` 参照)
+- Forge/NeoForge の自動導入にはインストーラjarの実行に Java (JRE/JDK) が必要です。設定画面またはプロファイルで指定したJavaパス(未指定時はPATH上の `java`)が使われます
 - Windows で `cargo build` 時に MSVC ヘッダ(`vcruntime.h` 等)が見つからないエラーが出る場合は、Visual Studio Installer で「C++ によるデスクトップ開発」ワークロードが正しくインストールされているか確認してください
 
 ## ステータス

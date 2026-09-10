@@ -130,6 +130,15 @@ pub struct Library {
     pub natives: Option<HashMap<String, String>>,
     #[serde(default)]
     pub extract: Option<ExtractRules>,
+    /// Fabric/Quilt/Forge等のローダーが生成するバージョンJSONで使われる「フラット形式」の
+    /// ライブラリ定義。`downloads` が存在しない場合、ここに入るMavenリポジトリのベースURLと
+    /// `name` (Maven座標)からダウンロードURL・保存パスを合成する
+    /// ([`crate::maven::resolve_library_artifact`] 参照)。
+    #[serde(default)]
+    pub url: Option<String>,
+    /// フラット形式での期待SHA1(省略されることがある。その場合はハッシュ検証を行わない)。
+    #[serde(default)]
+    pub sha1: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -319,6 +328,8 @@ fn merge_with_parent(child: PartialVersionDetails, parent: VersionDetails) -> Ve
 /// ライブラリ一覧を親→子の順にマージする。子側に同じMaven座標(`group:artifact`)の
 /// エントリがある場合、親側の対応エントリは取り除く(バージョン差し替えとして扱う)。
 fn merge_libraries(parent: Vec<Library>, child: Vec<Library>) -> Vec<Library> {
+    use crate::maven::maven_group_artifact;
+
     let child_keys: std::collections::HashSet<String> = child
         .iter()
         .map(|library| maven_group_artifact(&library.name))
@@ -329,12 +340,6 @@ fn merge_libraries(parent: Vec<Library>, child: Vec<Library>) -> Vec<Library> {
         .collect();
     merged.extend(child);
     merged
-}
-
-/// Maven座標(`group:artifact:version[:classifier]`)から `group:artifact` 部分のみを
-/// 取り出す(バージョン差し替え検出のための比較キー)。
-fn maven_group_artifact(name: &str) -> String {
-    name.splitn(3, ':').take(2).collect::<Vec<_>>().join(":")
 }
 
 /// バージョン解決の出所。

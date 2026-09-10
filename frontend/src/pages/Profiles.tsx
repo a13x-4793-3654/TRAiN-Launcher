@@ -13,6 +13,7 @@ import {
   CardHeader,
   Combobox,
   Option,
+  Dropdown,
   Dialog,
   DialogSurface,
   DialogTitle,
@@ -45,6 +46,7 @@ interface Profile {
   name: string;
   minecraft_version: string;
   mod_loader: string | null;
+  mod_loader_version: string | null;
   server_id: string | null;
   java_path: string | null;
   max_memory_mb: number | null;
@@ -55,6 +57,11 @@ interface Profile {
 interface VersionEntry {
   id: string;
   type: string;
+}
+
+interface LoaderVersionInfo {
+  version: string;
+  stable: boolean;
 }
 
 interface GameExitedPayload {
@@ -68,11 +75,26 @@ interface LaunchProgressPayload {
   total: number;
 }
 
+/** Modローダー未指定(バニラ)を表す内部値。保存時は `null` に変換する。 */
+const NO_MOD_LOADER = "none";
+
+const MOD_LOADER_LABELS: Record<string, string> = {
+  [NO_MOD_LOADER]: "バニラ(Modローダーなし)",
+  fabric: "Fabric",
+  quilt: "Quilt",
+  forge: "Forge",
+  neoforge: "NeoForge",
+};
+
+const MOD_LOADER_OPTIONS = [NO_MOD_LOADER, "fabric", "quilt", "forge", "neoforge"];
+
 /** プロファイル作成/編集ダイアログの入力状態(数値項目は文字列で保持しバリデーションは送信時に行う)。 */
 interface ProfileFormState {
   id: string | null; // nullの場合は新規作成
   name: string;
   minecraftVersion: string;
+  modLoader: string; // NO_MOD_LOADER の場合は保存時に null に変換する
+  modLoaderVersion: string; // 空文字列の場合は自動選択(推奨/最新)として保存時に null に変換する
   javaPath: string;
   maxMemoryMb: string;
   // 編集時に既存の最終起動日時を保持したまま保存するための値(フォーム上には表示しない)。
@@ -83,6 +105,8 @@ const EMPTY_FORM: ProfileFormState = {
   id: null,
   name: "",
   minecraftVersion: "",
+  modLoader: NO_MOD_LOADER,
+  modLoaderVersion: "",
   javaPath: "",
   maxMemoryMb: "",
   lastLaunchedAt: null,
@@ -146,6 +170,9 @@ export function ProfilesPage() {
 
   const [versions, setVersions] = useState<VersionEntry[]>([]);
   const [versionsLoading, setVersionsLoading] = useState(false);
+
+  const [loaderVersions, setLoaderVersions] = useState<LoaderVersionInfo[]>([]);
+  const [loaderVersionsLoading, setLoaderVersionsLoading] = useState(false);
 
   const [dialogOpen, setDialogOpen] = useState(false);
   const [form, setForm] = useState<ProfileFormState>(EMPTY_FORM);
@@ -215,8 +242,28 @@ export function ProfilesPage() {
       .finally(() => setVersionsLoading(false));
   };
 
+  // 選択可能なローダーバージョン一覧を取得する(バニラの場合は問い合わせない)。
+  const loadLoaderVersions = (loader: string, gameVersion: string) => {
+    if (loader === NO_MOD_LOADER || !gameVersion.trim()) {
+      setLoaderVersions([]);
+      return;
+    }
+    setLoaderVersionsLoading(true);
+    invoke<LoaderVersionInfo[]>("list_mod_loader_versions", {
+      loader,
+      gameVersion: gameVersion.trim(),
+    })
+      .then(setLoaderVersions)
+      .catch((err) => {
+        console.error("failed to load mod loader versions", err);
+        setLoaderVersions([]);
+      })
+      .finally(() => setLoaderVersionsLoading(false));
+  };
+
   const openCreateDialog = () => {
     setForm(EMPTY_FORM);
+    setLoaderVersions([]);
     setDialogOpen(true);
     ensureVersionsLoaded();
   };
@@ -226,6 +273,8 @@ export function ProfilesPage() {
       id: profile.id,
       name: profile.name,
       minecraftVersion: profile.minecraft_version,
+      modLoader: profile.mod_loader ?? NO_MOD_LOADER,
+      modLoaderVersion: profile.mod_loader_version ?? "",
       javaPath: profile.java_path ?? "",
       maxMemoryMb:
         profile.max_memory_mb != null ? String(profile.max_memory_mb) : "",
@@ -233,6 +282,11 @@ export function ProfilesPage() {
     });
     setDialogOpen(true);
     ensureVersionsLoaded();
+    if (profile.mod_loader) {
+      loadLoaderVersions(profile.mod_loader, profile.minecraft_version);
+    } else {
+      setLoaderVersions([]);
+    }
   };
 
   const handleSubmit = () => {
@@ -259,7 +313,11 @@ export function ProfilesPage() {
       id: form.id ?? crypto.randomUUID(),
       name,
       minecraft_version: minecraftVersion,
-      mod_loader: null,
+      mod_loader: form.modLoader === NO_MOD_LOADER ? null : form.modLoader,
+      mod_loader_version:
+        form.modLoader === NO_MOD_LOADER
+          ? null
+          : form.modLoaderVersion.trim() || null,
       server_id: null,
       java_path: form.javaPath.trim() || null,
       max_memory_mb: maxMemoryMb,
@@ -388,6 +446,16 @@ export function ProfilesPage() {
                 description={
                   <Caption1>
                     {profile.minecraft_version}
+                    {profile.mod_loader
+                      ? ` ・ ${
+                          MOD_LOADER_LABELS[profile.mod_loader] ??
+                          profile.mod_loader
+                        }${
+                          profile.mod_loader_version
+                            ? ` ${profile.mod_loader_version}`
+                            : ""
+                        }`
+                      : ""}
                     {profile.java_path ? ` ・ Java: ${profile.java_path}` : ""}
                     {profile.max_memory_mb
                       ? ` ・ 最大メモリ: ${profile.max_memory_mb}MB`
@@ -476,12 +544,15 @@ export function ProfilesPage() {
                   freeform
                   value={form.minecraftVersion}
                   placeholder="例: 1.20.4"
-                  onOptionSelect={(_event, data) =>
+                  onOptionSelect={(_event, data) => {
+                    const nextVersion = data.optionValue ?? form.minecraftVersion;
                     setForm((f) => ({
                       ...f,
-                      minecraftVersion: data.optionValue ?? f.minecraftVersion,
-                    }))
-                  }
+                      minecraftVersion: nextVersion,
+                      modLoaderVersion: "",
+                    }));
+                    loadLoaderVersions(form.modLoader, nextVersion);
+                  }}
                   onChange={(event) =>
                     setForm((f) => ({
                       ...f,
@@ -506,6 +577,68 @@ export function ProfilesPage() {
                   ))}
                 </Combobox>
               </Field>
+              <Field label="Modローダー">
+                <Dropdown
+                  value={MOD_LOADER_LABELS[form.modLoader] ?? form.modLoader}
+                  selectedOptions={[form.modLoader]}
+                  onOptionSelect={(_event, data) => {
+                    const nextLoader = data.optionValue ?? NO_MOD_LOADER;
+                    setForm((f) => ({
+                      ...f,
+                      modLoader: nextLoader,
+                      modLoaderVersion: "",
+                    }));
+                    loadLoaderVersions(nextLoader, form.minecraftVersion);
+                  }}
+                >
+                  {MOD_LOADER_OPTIONS.map((loader) => (
+                    <Option key={loader} value={loader} text={MOD_LOADER_LABELS[loader]}>
+                      {MOD_LOADER_LABELS[loader]}
+                    </Option>
+                  ))}
+                </Dropdown>
+              </Field>
+              {form.modLoader !== NO_MOD_LOADER && (
+                <Field
+                  label="ローダーバージョン(任意)"
+                  hint="未指定の場合は安定版の最新(推奨版)を自動選択します"
+                >
+                  <Combobox
+                    freeform
+                    value={form.modLoaderVersion}
+                    placeholder="自動選択(推奨/最新)"
+                    onOptionSelect={(_event, data) =>
+                      setForm((f) => ({
+                        ...f,
+                        modLoaderVersion: data.optionValue ?? f.modLoaderVersion,
+                      }))
+                    }
+                    onChange={(event) =>
+                      setForm((f) => ({
+                        ...f,
+                        modLoaderVersion: (event.target as HTMLInputElement)
+                          .value,
+                      }))
+                    }
+                  >
+                    {loaderVersionsLoading && (
+                      <Option key="__loading" value="" disabled>
+                        読み込み中...
+                      </Option>
+                    )}
+                    {loaderVersions.map((entry) => (
+                      <Option
+                        key={entry.version}
+                        value={entry.version}
+                        text={entry.version}
+                      >
+                        {entry.version}
+                        {entry.stable ? "" : "(不安定版)"}
+                      </Option>
+                    ))}
+                  </Combobox>
+                </Field>
+              )}
               <Field
                 label="Javaパス(任意)"
                 hint="未指定の場合はPATH上のjavaを使用します"

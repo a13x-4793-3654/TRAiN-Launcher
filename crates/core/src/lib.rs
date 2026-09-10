@@ -6,6 +6,8 @@
 pub mod download;
 pub mod launch;
 pub mod launcher_profiles;
+pub mod maven;
+pub mod mod_loader;
 pub mod paths;
 pub mod profile;
 pub mod rules;
@@ -46,5 +48,11 @@ mod error {
         ProfileNotFound(String),
         #[error("profile already exists: {0}")]
         ProfileAlreadyExists(String),
+        #[error("unsupported mod loader: {0}")]
+        UnsupportedModLoader(String),
+        #[error("no matching mod loader version found for {loader} {game_version}")]
+        ModLoaderVersionNotFound { loader: String, game_version: String },
+        #[error("mod loader installation failed: {0}")]
+        ModLoaderInstallFailed(String),
     }
 }

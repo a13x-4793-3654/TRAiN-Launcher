@@ -40,9 +40,17 @@ pub struct Profile {
     pub id: String,
     pub name: String,
     pub minecraft_version: String,
-    /// TODO: Forge/Fabric等のModローダー起動には未対応。現状は表示・保存のみ。
+    /// Modローダーの種類(`"fabric"` / `"quilt"` / `"forge"` / `"neoforge"`、
+    /// 大文字小文字は区別しない)。指定されている場合、起動時に
+    /// `minecraft_version`(バニラ版)を基準にローダーを自動導入し、
+    /// 導入後の派生バージョンで起動する(未対応の文字列の場合は起動時にエラーになる)。
     #[serde(default)]
     pub mod_loader: Option<String>,
+    /// 導入するローダーの具体的なバージョン(例: `"0.19.5"`)。未指定の場合は
+    /// 安定版の最新(Forgeは`recommended`)を自動選択する。`mod_loader` が
+    /// `None` の場合は無視される。
+    #[serde(default)]
+    pub mod_loader_version: Option<String>,
     /// TRAiNの所属サーバーから自動取得したプロファイルの場合、そのサーバーID。
     #[serde(default)]
     pub server_id: Option<String>,
@@ -115,6 +123,7 @@ fn official_to_profile(official: OfficialProfile) -> Profile {
         name: official.name,
         minecraft_version: official.last_version_id.unwrap_or_default(),
         mod_loader: None,
+        mod_loader_version: None,
         server_id: None,
         java_path: official.java_dir,
         max_memory_mb,

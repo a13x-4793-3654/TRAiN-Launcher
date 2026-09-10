@@ -16,9 +16,10 @@ use std::sync::Arc;
 use sha1::{Digest, Sha1};
 use tokio::sync::Semaphore;
 
+use crate::maven;
 use crate::paths::LauncherPaths;
 use crate::rules::{rules_allow, CurrentPlatform};
-use crate::version_manifest::{self, Artifact, VersionDetails, VersionSource};
+use crate::version_manifest::{self, VersionDetails, VersionSource};
 use crate::CoreError;
 
 /// 同時ダウンロード数の上限(アセットは数千個に及ぶため、際限なく並行実行しない)。
@@ -101,6 +102,38 @@ async fn download_verified(
     }
     tokio::fs::write(dest, &bytes).await?;
     Ok(())
+}
+
+/// 1ファイルをダウンロードして保存する。`expected_sha1` が `Some` の場合は
+/// [`download_verified`] と同様にハッシュ検証・スキップ判定を行うが、`None` の場合
+/// (Fabric/Quilt等のフラット形式ライブラリでSHA1が省略されている場合)はハッシュ検証を
+/// 行わず、ファイルが既に存在すればそのまま再利用する。
+async fn download_maybe_verified(
+    client: &reqwest::Client,
+    url: &str,
+    expected_sha1: Option<&str>,
+    dest: &Path,
+) -> Result<(), CoreError> {
+    match expected_sha1 {
+        Some(expected_sha1) => download_verified(client, url, expected_sha1, dest).await,
+        None => {
+            if dest.exists() {
+                return Ok(());
+            }
+            let bytes = client
+                .get(url)
+                .send()
+                .await?
+                .error_for_status()?
+                .bytes()
+                .await?;
+            if let Some(parent) = dest.parent() {
+                tokio::fs::create_dir_all(parent).await?;
+            }
+            tokio::fs::write(dest, &bytes).await?;
+            Ok(())
+        }
+    }
 }
 
 /// 指定バージョンに必要なライブラリ/アセット/クライアントjarをダウンロードする。
@@ -215,18 +248,18 @@ async fn download_libraries(
         if !rules_allow(&library.rules, platform) {
             continue;
         }
-        let Some(downloads) = &library.downloads else {
-            continue;
-        };
 
-        if let Some(artifact) = &downloads.artifact {
-            let dest = artifact_dest(paths, artifact, &library.name)?;
+        // 通常のクラスパス用ライブラリ。Mojang形式(`downloads.artifact`)・
+        // Fabric/Quilt/Forge等が生成するフラット形式(トップレベルの `url`)の両方に対応する
+        // ([`maven::resolve_library_artifact`] 参照)。
+        if let Some(resolved) = maven::resolve_library_artifact(library)? {
+            let dest = paths.library_path(&resolved.relative_path);
             spawn_download(
                 &mut tasks,
                 semaphore.clone(),
                 client.clone(),
-                artifact.url.clone(),
-                artifact.sha1.clone(),
+                resolved.url,
+                resolved.sha1,
                 dest,
             );
             total += 1;
@@ -234,7 +267,7 @@ async fn download_libraries(
 
         // レガシー(LWJGL2世代)ネイティブライブラリ: `natives` マップと `classifiers` の
         // 両方が揃っている場合のみ、対応する分類子のjarを展開対象とする。
-        if let Some(natives_map) = &library.natives {
+        if let (Some(downloads), Some(natives_map)) = (&library.downloads, &library.natives) {
             if let Some(classifier_key) = natives_map.get(platform.os_name) {
                 let classifier_key = classifier_key.replace("${arch}", platform.arch_bits());
                 if let Some(classifiers) = &downloads.classifiers {
@@ -292,46 +325,17 @@ async fn download_libraries(
     Ok(())
 }
 
-/// ライブラリの `artifact.path` から `libraries/` 配下の保存先を組み立てる。
-/// `path` が省略されている場合(ごく古い形式)はMavenの `name` (`group:artifact:version`) から
-/// 標準的なMavenレイアウトパスを合成する。
-fn artifact_dest(
-    paths: &LauncherPaths,
-    artifact: &Artifact,
-    library_name: &str,
-) -> Result<std::path::PathBuf, CoreError> {
-    if let Some(path) = &artifact.path {
-        return Ok(paths.library_path(path));
-    }
-    maven_path(library_name).map(|relative| paths.library_path(&relative))
-}
-
-/// `group:artifact:version[:classifier]` 形式のMaven座標をパスに変換する。
-fn maven_path(name: &str) -> Result<String, CoreError> {
-    let parts: Vec<&str> = name.split(':').collect();
-    let [group, artifact, version] = parts[..3.min(parts.len())] else {
-        return Err(CoreError::InvalidLibraryName(name.to_string()));
-    };
-    let classifier = parts.get(3);
-    let group_path = group.replace('.', "/");
-    let file_name = match classifier {
-        Some(classifier) => format!("{artifact}-{version}-{classifier}.jar"),
-        None => format!("{artifact}-{version}.jar"),
-    };
-    Ok(format!("{group_path}/{artifact}/{version}/{file_name}"))
-}
-
 fn spawn_download(
     tasks: &mut tokio::task::JoinSet<Result<(), CoreError>>,
     semaphore: Arc<Semaphore>,
     client: reqwest::Client,
     url: String,
-    sha1: String,
+    sha1: Option<String>,
     dest: std::path::PathBuf,
 ) {
     tasks.spawn(async move {
         let _permit = semaphore.acquire_owned().await.expect("semaphore closed");
-        download_verified(&client, &url, &sha1, &dest).await
+        download_maybe_verified(&client, &url, sha1.as_deref(), &dest).await
     });
 }
 
@@ -397,7 +401,7 @@ async fn download_assets(
             semaphore.clone(),
             client.clone(),
             url,
-            object.hash.clone(),
+            Some(object.hash.clone()),
             dest,
         );
     }

@@ -269,6 +269,30 @@ async fn list_minecraft_versions(
         .map_err(|err| err.to_string())
 }
 
+/// 指定Minecraftバージョン向けに選択可能なModローダーの一覧
+/// (`"fabric"`, `"quilt"`, `"forge"`, `"neoforge"`)。
+///
+/// 実際にそのバージョンにローダーが提供されているかまでは確認しない
+/// (フロントエンドの選択肢を固定するための静的な一覧)。
+#[tauri::command]
+fn list_supported_mod_loaders() -> Vec<&'static str> {
+    vec!["fabric", "quilt", "forge", "neoforge"]
+}
+
+/// 指定Modローダー・Minecraftバージョンの組み合わせで選択可能なローダーバージョン一覧を、
+/// 新しい順で取得する(プロファイル作成/編集画面のCombobox用)。
+#[tauri::command]
+async fn list_mod_loader_versions(
+    loader: String,
+    game_version: String,
+) -> Result<Vec<train_launcher_core::mod_loader::LoaderVersionInfo>, String> {
+    let kind = train_launcher_core::mod_loader::ModLoaderKind::parse(&loader)
+        .ok_or_else(|| format!("未対応のModローダーです: {loader}"))?;
+    train_launcher_core::mod_loader::list_loader_versions(kind, &game_version)
+        .await
+        .map_err(|err| err.to_string())
+}
+
 /// Discordサインイン後の所属サーバー一覧を取得する。
 ///
 /// 環境変数 `TRAIN_LAUNCHER_API_BASE_URL` が設定されていれば実際のTRAiN APIへ、未設定なら
@@ -565,6 +589,40 @@ async fn launch_profile(
     // (二重ダウンロードを避け、どちらのランチャーからでも同じファイルを再利用できるようにする)。
     let launcher_root = minecraft_root();
 
+    // Modローダーが指定されている場合、`minecraft_version`(バニラ)を基準にローダーを
+    // 自動導入し、以降のダウンロード/起動には導入後のバージョンID(例:
+    // `fabric-loader-0.19.5-1.20.4`)を使う。未導入の場合のみ実際のインストールが走る。
+    let game_version = if let Some(loader_name) = profile.mod_loader.clone() {
+        let loader_kind = train_launcher_core::mod_loader::ModLoaderKind::parse(&loader_name)
+            .ok_or_else(|| format!("未対応のModローダーです: {loader_name}"))?;
+
+        let _ = app_handle.emit(
+            LAUNCH_PROGRESS_EVENT,
+            LaunchProgressPayload {
+                phase: "installing_mod_loader",
+                phase_label: "Modローダーを導入中...".to_string(),
+                completed: 0,
+                total: 0,
+            },
+        );
+
+        let installer_java_path = profile
+            .java_path
+            .clone()
+            .unwrap_or_else(|| "java".to_string());
+        train_launcher_core::mod_loader::ensure_mod_loader_installed(
+            loader_kind,
+            &profile.minecraft_version,
+            profile.mod_loader_version.as_deref(),
+            &launcher_root,
+            &installer_java_path,
+        )
+        .await
+        .map_err(|err| err.to_string())?
+    } else {
+        profile.minecraft_version.clone()
+    };
+
     let progress_handle = app_handle.clone();
     let on_progress: train_launcher_core::download::ProgressCallback =
         std::sync::Arc::new(move |progress| {
@@ -575,7 +633,7 @@ async fn launch_profile(
         });
 
     let resolved_version = train_launcher_core::download::download_version_files(
-        &profile.minecraft_version,
+        &game_version,
         &launcher_root,
         on_progress,
     )
@@ -684,6 +742,9 @@ async fn join_train_server(
         name: server_name,
         minecraft_version: server_config.minecraft_version.clone(),
         mod_loader: server_config.mod_loader.clone(),
+        // TRAiNサーバー設定には現状ローダーの具体バージョンを指定する項目が無いため、
+        // 常に最新の安定版を自動選択する。
+        mod_loader_version: None,
         server_id: Some(server_id),
         java_path: None,
         max_memory_mb: None,
@@ -776,6 +837,8 @@ pub fn run() {
             update_profile,
             delete_profile,
             list_minecraft_versions,
+            list_supported_mod_loaders,
+            list_mod_loader_versions,
             list_member_servers,
             resolve_mod_url,
             install_mod,

@@ -100,6 +100,8 @@ const useStyles = makeStyles({
   cardActions: {
     display: "flex",
     gap: tokens.spacingHorizontalXS,
+    flexShrink: 0,
+    whiteSpace: "nowrap",
   },
   progressArea: {
     display: "flex",

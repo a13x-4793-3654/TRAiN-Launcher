@@ -66,9 +66,10 @@ impl ModLoaderKind {
 #[serde(rename_all = "camelCase")]
 pub struct LoaderVersionInfo {
     pub version: String,
-    /// 安定版かどうか(Fabric/Quilt: メタデータの `stable` フラグ、
+    /// 安定版かどうか(Fabric: メタデータの `stable` フラグ、
+    /// Quilt: メタデータに `stable` フラグが存在しないため [`looks_stable`] によるヒューリスティック、
     /// Forge: `promotions_slim.json` の `recommended` に該当、
-    /// NeoForge: バージョン文字列に `-beta`/`-alpha` を含まない)。
+    /// NeoForge: [`looks_stable`] によるヒューリスティック)。
     pub stable: bool,
 }
 
@@ -78,6 +79,16 @@ const FORGE_PROMOTIONS_URL: &str =
     "https://files.minecraftforge.net/net/minecraftforge/forge/promotions_slim.json";
 const NEOFORGE_VERSIONS_URL: &str =
     "https://maven.neoforged.net/api/maven/versions/releases/net/neoforged/neoforge";
+
+/// バージョン文字列に一般的なプレリリースマーカー(`-beta`/`-alpha`/`-rc`/`-pre`)が
+/// 含まれていなければ安定版とみなすヒューリスティック。Quiltのメタデータには`stable`
+/// フラグが存在しないため、その代替として使う(NeoForgeも同様に使用)。
+fn looks_stable(version: &str) -> bool {
+    let lower = version.to_ascii_lowercase();
+    !["-beta", "-alpha", "-rc", "-pre"]
+        .iter()
+        .any(|marker| lower.contains(marker))
+}
 
 /// 指定Minecraftバージョンに対して選択可能なローダーバージョン一覧を、新しい順で返す。
 ///
@@ -101,7 +112,10 @@ pub async fn list_loader_versions(
 #[derive(Debug, Deserialize)]
 struct FabricLikeLoaderMeta {
     version: String,
-    stable: bool,
+    /// FabricのメタデータにはこのフィールドがあるがQuiltには無いため`Option`にし、
+    /// 無い場合は [`looks_stable`] で代替する。
+    #[serde(default)]
+    stable: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -121,9 +135,15 @@ async fn list_fabric_like_versions(
         .await?;
     Ok(entries
         .into_iter()
-        .map(|entry| LoaderVersionInfo {
-            version: entry.loader.version,
-            stable: entry.loader.stable,
+        .map(|entry| {
+            let stable = entry
+                .loader
+                .stable
+                .unwrap_or_else(|| looks_stable(&entry.loader.version));
+            LoaderVersionInfo {
+                version: entry.loader.version,
+                stable,
+            }
         })
         .collect())
 }
@@ -132,6 +152,7 @@ async fn list_fabric_like_versions(
 struct ForgePromotions {
     promos: std::collections::HashMap<String, String>,
 }
+
 
 async fn list_forge_versions(game_version: &str) -> Result<Vec<LoaderVersionInfo>, CoreError> {
     let promotions: ForgePromotions = reqwest::get(FORGE_PROMOTIONS_URL)
@@ -192,7 +213,7 @@ async fn list_neoforge_versions(game_version: &str) -> Result<Vec<LoaderVersionI
         .into_iter()
         .filter(|version| version.starts_with(&prefix_with_dot))
         .map(|version| {
-            let stable = !version.contains("-beta") && !version.contains("-alpha");
+            let stable = looks_stable(&version);
             LoaderVersionInfo { version, stable }
         })
         .collect();
@@ -408,4 +429,116 @@ async fn ensure_installer_based_loader_installed(
                 "installer completed but no new version was found under versions/".to_string(),
             )
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_recognizes_all_kinds_case_insensitively() {
+        assert_eq!(ModLoaderKind::parse("Fabric"), Some(ModLoaderKind::Fabric));
+        assert_eq!(ModLoaderKind::parse("QUILT"), Some(ModLoaderKind::Quilt));
+        assert_eq!(ModLoaderKind::parse("forge"), Some(ModLoaderKind::Forge));
+        assert_eq!(ModLoaderKind::parse("NeoForge"), Some(ModLoaderKind::NeoForge));
+        assert_eq!(ModLoaderKind::parse("vanilla"), None);
+    }
+
+    #[test]
+    fn neoforge_prefix_derives_minor_patch_from_mc_version() {
+        assert_eq!(neoforge_prefix("1.20.4"), Some("20.4".to_string()));
+        assert_eq!(neoforge_prefix("1.21"), Some("21.0".to_string()));
+        // "1." で始まらないバージョン文字列(将来のMC2桁目以降の変化等)は非対応。
+        assert_eq!(neoforge_prefix("20.4"), None);
+    }
+
+    #[test]
+    fn version_sort_key_orders_numerically_not_lexicographically() {
+        // 文字列としての辞書順ソートでは "20.4.100" < "20.4.9" になってしまうが、
+        // 数値としては "20.4.100" の方が大きい。
+        let a = version_sort_key("20.4.9");
+        let b = version_sort_key("20.4.100");
+        assert!(a < b, "expected {a:?} < {b:?}");
+    }
+
+    #[test]
+    fn pick_default_version_prefers_stable_entry() {
+        let versions = vec![
+            LoaderVersionInfo {
+                version: "0.16.0-beta.1".to_string(),
+                stable: false,
+            },
+            LoaderVersionInfo {
+                version: "0.15.11".to_string(),
+                stable: true,
+            },
+        ];
+        assert_eq!(pick_default_version(&versions), Some("0.15.11".to_string()));
+    }
+
+    #[test]
+    fn pick_default_version_falls_back_to_first_when_no_stable_entry() {
+        let versions = vec![LoaderVersionInfo {
+            version: "0.16.0-beta.1".to_string(),
+            stable: false,
+        }];
+        assert_eq!(
+            pick_default_version(&versions),
+            Some("0.16.0-beta.1".to_string())
+        );
+    }
+
+    // 以下はネットワーク接続が必要な統合テスト。CI/オフライン環境では実行されないよう
+    // `#[ignore]` を付与している。手動確認する場合は
+    // `cargo test -p train-launcher-core mod_loader:: -- --ignored --nocapture` を実行する。
+
+    #[tokio::test]
+    #[ignore = "requires network access to meta.fabricmc.net"]
+    async fn list_loader_versions_fabric_returns_real_data() {
+        let versions = list_loader_versions(ModLoaderKind::Fabric, "1.20.4")
+            .await
+            .expect("fabric meta API request should succeed");
+        assert!(!versions.is_empty(), "expected at least one fabric loader version");
+        assert!(
+            versions.iter().any(|v| v.stable),
+            "expected at least one stable fabric loader version"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires network access to meta.quiltmc.org"]
+    async fn list_loader_versions_quilt_returns_real_data() {
+        let versions = list_loader_versions(ModLoaderKind::Quilt, "1.20.4")
+            .await
+            .expect("quilt meta API request should succeed");
+        assert!(!versions.is_empty(), "expected at least one quilt loader version");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires network access to files.minecraftforge.net"]
+    async fn list_loader_versions_forge_returns_recommended_or_latest() {
+        let versions = list_loader_versions(ModLoaderKind::Forge, "1.20.1")
+            .await
+            .expect("forge promotions request should succeed");
+        assert!(
+            !versions.is_empty(),
+            "expected at least a recommended or latest forge version for 1.20.1"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires network access to maven.neoforged.net"]
+    async fn list_loader_versions_neoforge_returns_matching_prefix() {
+        let versions = list_loader_versions(ModLoaderKind::NeoForge, "1.20.4")
+            .await
+            .expect("neoforge versions request should succeed");
+        assert!(!versions.is_empty(), "expected at least one neoforge version for 1.20.4");
+        for entry in &versions {
+            assert!(
+                entry.version.starts_with("20.4."),
+                "unexpected neoforge version outside of 20.4.x prefix: {}",
+                entry.version
+            );
+        }
+    }
 }

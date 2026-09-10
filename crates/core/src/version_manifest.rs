@@ -378,9 +378,10 @@ const MAX_INHERITANCE_DEPTH: u8 = 8;
 ///    `<destination>/versions/<id>/<id>.json` をローカルから読み込み、`inheritsFrom` で
 ///    指定された親バージョン(再帰的に本関数で解決)とマージする。
 ///
-/// Modローダー自体の新規インストール(Fabric/Forgeのインストーラ相当の処理)には未対応。
-/// 公式Minecraft Launcherや各ローダー公式のインストーラ等で事前に導入済みであり、
-/// `versions/<id>/<id>.json` がローカルに存在していることが前提となる。
+/// Modローダー自体の新規インストールは本関数の範囲外([`crate::mod_loader`] が担当する)。
+/// 本関数は、`versions/<id>/<id>.json` が(公式Launcher・各ローダー公式インストーラ・
+/// [`crate::mod_loader::ensure_mod_loader_installed`] のいずれかによって)既にローカルに
+/// 存在していることを前提に解決するのみである。
 pub async fn resolve_version(
     version_id: &str,
     paths: &LauncherPaths,

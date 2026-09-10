@@ -54,6 +54,10 @@ pub struct Profile {
     pub max_memory_mb: Option<u32>,
     #[serde(default)]
     pub source: ProfileSource,
+    /// 最終起動日時(ISO 8601、UTC)。ホーム画面の「最近使ったプロファイル」表示に使用する。
+    /// 未起動の場合は `None`。
+    #[serde(default)]
+    pub last_launched_at: Option<String>,
 }
 
 fn profiles_file_path() -> std::path::PathBuf {
@@ -115,6 +119,7 @@ fn official_to_profile(official: OfficialProfile) -> Profile {
         java_path: official.java_dir,
         max_memory_mb,
         source: ProfileSource::Official,
+        last_launched_at: None,
     }
 }
 
@@ -207,4 +212,24 @@ pub fn delete_profile(id: &str) -> Result<(), CoreError> {
         return Err(CoreError::ProfileNotFound(id.to_string()));
     }
     Ok(())
+}
+
+/// 指定プロファイルの最終起動日時を現在時刻(UTC)で更新する。
+///
+/// ホーム画面の「最近使ったプロファイル」表示のために、`launch_minecraft`/
+/// `join_train_server` からの起動成功時に呼び出される。対象IDがTRAiN側の
+/// `profiles.json` にまだ存在しない場合(公式ランチャー側のみに存在するプロファイルを
+/// 起動した場合など)は、[`get_profile`] で解決した内容を新規に取り込んで保存する。
+pub fn mark_launched(id: &str) -> Result<(), CoreError> {
+    let mut profiles = load_all()?;
+    let now = chrono::Utc::now().to_rfc3339();
+    match profiles.iter().position(|profile| profile.id == id) {
+        Some(index) => profiles[index].last_launched_at = Some(now),
+        None => {
+            let mut profile = get_profile(id)?;
+            profile.last_launched_at = Some(now);
+            profiles.push(profile);
+        }
+    }
+    save_all(&profiles)
 }

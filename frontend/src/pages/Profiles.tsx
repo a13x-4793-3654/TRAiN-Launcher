@@ -49,6 +49,7 @@ interface Profile {
   java_path: string | null;
   max_memory_mb: number | null;
   source: "train" | "official";
+  last_launched_at: string | null;
 }
 
 interface VersionEntry {
@@ -74,6 +75,8 @@ interface ProfileFormState {
   minecraftVersion: string;
   javaPath: string;
   maxMemoryMb: string;
+  // 編集時に既存の最終起動日時を保持したまま保存するための値(フォーム上には表示しない)。
+  lastLaunchedAt: string | null;
 }
 
 const EMPTY_FORM: ProfileFormState = {
@@ -82,6 +85,7 @@ const EMPTY_FORM: ProfileFormState = {
   minecraftVersion: "",
   javaPath: "",
   maxMemoryMb: "",
+  lastLaunchedAt: null,
 };
 
 const useStyles = makeStyles({
@@ -225,6 +229,7 @@ export function ProfilesPage() {
       javaPath: profile.java_path ?? "",
       maxMemoryMb:
         profile.max_memory_mb != null ? String(profile.max_memory_mb) : "",
+      lastLaunchedAt: profile.last_launched_at,
     });
     setDialogOpen(true);
     ensureVersionsLoaded();
@@ -261,6 +266,7 @@ export function ProfilesPage() {
       // TRAiN側で作成/編集した時点でTRAiN管理のプロファイルとなる
       // (公式ランチャー由来のプロファイルを編集した場合も、この操作でTRAiN側に取り込まれる)。
       source: "train",
+      last_launched_at: form.lastLaunchedAt,
     };
 
     setSaving(true);

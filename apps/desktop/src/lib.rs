@@ -603,6 +603,12 @@ async fn launch_profile(
         .await
         .map_err(|err| err.to_string())?;
 
+    // ホーム画面の「最近使ったプロファイル」表示用に最終起動日時を記録する。
+    // 記録に失敗してもゲーム自体の起動は継続させたいため、エラーはログ出力のみに留める。
+    if let Err(err) = train_launcher_core::profile::mark_launched(&profile.id) {
+        eprintln!("failed to record last launched profile: {err}");
+    }
+
     let _ = app_handle.emit(
         LAUNCH_PROGRESS_EVENT,
         LaunchProgressPayload {
@@ -680,6 +686,7 @@ async fn join_train_server(
         java_path: None,
         max_memory_mb: None,
         source: ProfileSource::Train,
+        last_launched_at: None,
     };
     match train_launcher_core::profile::create_profile(profile.clone()) {
         Ok(()) => {}

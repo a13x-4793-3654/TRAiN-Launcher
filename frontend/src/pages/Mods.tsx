@@ -6,6 +6,7 @@ import {
   Title3,
   Field,
   Input,
+  InfoLabel,
   Button,
   Spinner,
   Text,
@@ -212,8 +213,11 @@ function InstallPanel(props: {
           />
         </Field>
         <Field
-          label="対象Minecraftバージョン(任意)"
-          hint="未指定の場合は最新の互換バージョンを使用します"
+          label={
+            <InfoLabel info="未指定の場合は最新の互換バージョンを使用します">
+              対象Minecraftバージョン(任意)
+            </InfoLabel>
+          }
         >
           <Input
             value={minecraftVersion}

@@ -1,4 +1,19 @@
-import { Body1, Title2 } from "@fluentui/react-components";
+import { Body1, Title2, makeStyles, tokens } from "@fluentui/react-components";
+
+const useStyles = makeStyles({
+  hero: {
+    display: "flex",
+    justifyContent: "center",
+    marginBottom: tokens.spacingVerticalXL,
+  },
+  heroLogo: {
+    width: "100%",
+    maxWidth: "640px",
+    height: "auto",
+    borderRadius: tokens.borderRadiusXLarge,
+    boxShadow: tokens.shadow16,
+  },
+});
 
 /**
  * ホーム画面(プレースホルダー)。
@@ -7,8 +22,16 @@ import { Body1, Title2 } from "@fluentui/react-components";
  * お知らせなどのダッシュボードをここに実装する。
  */
 export function HomePage() {
+  const styles = useStyles();
   return (
     <div>
+      <div className={styles.hero}>
+        <img
+          src="/branding/train-launcher-logo.svg"
+          alt="TRAiN Launcher"
+          className={styles.heroLogo}
+        />
+      </div>
       <Title2 as="h2" block>
         ホーム
       </Title2>

@@ -17,8 +17,9 @@ import {
   makeStyles,
   tokens,
 } from "@fluentui/react-components";
-import { SaveRegular } from "@fluentui/react-icons";
+import { SaveRegular, FolderOpenRegular } from "@fluentui/react-icons";
 import { invoke } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-dialog";
 
 const TOASTER_ID = "settings-toaster";
 
@@ -61,6 +62,15 @@ const useStyles = makeStyles({
     gap: tokens.spacingVerticalM,
     marginTop: tokens.spacingVerticalM,
     maxWidth: "480px",
+  },
+  pathRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: tokens.spacingHorizontalXS,
+  },
+  pathInput: {
+    flexGrow: 1,
+    minWidth: 0,
   },
   actions: {
     display: "flex",
@@ -153,6 +163,38 @@ export function SettingsPage() {
     invoke("sign_out_microsoft")
       .then(() => refreshAuthStatus())
       .catch((err) => notifyError("Microsoftサインアウトに失敗しました", err));
+  };
+
+  const handleBrowseJavaPath = () => {
+    open({
+      multiple: false,
+      directory: false,
+      title: "Javaの実行ファイルを選択",
+      filters:
+        navigator.platform.toLowerCase().includes("win")
+          ? [{ name: "Java実行ファイル", extensions: ["exe"] }]
+          : undefined,
+    })
+      .then((selected) => {
+        if (typeof selected === "string") {
+          setJavaPath(selected);
+        }
+      })
+      .catch((err) => notifyError("ファイルの選択に失敗しました", err));
+  };
+
+  const handleBrowseGameDirectory = () => {
+    open({
+      multiple: false,
+      directory: true,
+      title: "ゲームディレクトリを選択",
+    })
+      .then((selected) => {
+        if (typeof selected === "string") {
+          setGameDirectory(selected);
+        }
+      })
+      .catch((err) => notifyError("フォルダーの選択に失敗しました", err));
   };
 
   const handleSave = () => {
@@ -255,12 +297,23 @@ export function SettingsPage() {
               </InfoLabel>
             }
           >
-            <Input
-              value={javaPath}
-              onChange={(_event, data) => setJavaPath(data.value)}
-              placeholder="例: C:\Program Files\Java\jdk-17\bin\java.exe"
-              disabled={loading}
-            />
+            <div className={styles.pathRow}>
+              <Input
+                className={styles.pathInput}
+                value={javaPath}
+                onChange={(_event, data) => setJavaPath(data.value)}
+                placeholder="例: C:\Program Files\Java\jdk-17\bin\java.exe"
+                disabled={loading}
+              />
+              <Button
+                appearance="secondary"
+                icon={<FolderOpenRegular />}
+                disabled={loading}
+                onClick={handleBrowseJavaPath}
+              >
+                参照...
+              </Button>
+            </div>
           </Field>
           <Field
             label={
@@ -269,12 +322,23 @@ export function SettingsPage() {
               </InfoLabel>
             }
           >
-            <Input
-              value={gameDirectory}
-              onChange={(_event, data) => setGameDirectory(data.value)}
-              placeholder="例: D:\Games\minecraft"
-              disabled={loading}
-            />
+            <div className={styles.pathRow}>
+              <Input
+                className={styles.pathInput}
+                value={gameDirectory}
+                onChange={(_event, data) => setGameDirectory(data.value)}
+                placeholder="例: D:\Games\minecraft"
+                disabled={loading}
+              />
+              <Button
+                appearance="secondary"
+                icon={<FolderOpenRegular />}
+                disabled={loading}
+                onClick={handleBrowseGameDirectory}
+              >
+                参照...
+              </Button>
+            </div>
           </Field>
           <div className={styles.actions}>
             <Button

@@ -26,3 +26,4 @@ train-launcher-core = { path = "../../crates/core" }
 train-launcher-auth = { path = "../../crates/auth" }
 train-launcher-mods = { path = "../../crates/mods" }
 train-launcher-server-api = { path = "../../crates/train-api" }
+tauri-plugin-dialog = "2.7.3"

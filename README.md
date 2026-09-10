@@ -93,6 +93,20 @@ $env:TRAIN_LAUNCHER_CURSEFORGE_API_KEY = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 npm run dev
 ```
 
+### TRAiN 独自バックエンドAPIを試すための環境変数
+
+TRAiN側の正式なAPI仕様は未確定です。以下の環境変数が未設定の場合、常にダミーデータを返すモック実装(`MockTrainApiClient`)にフォールバックします。実際のTRAiNバックエンドが用意できた場合のみ設定してください。
+
+| 環境変数 | 必須 | 説明 |
+| --- | --- | --- |
+| `TRAIN_LAUNCHER_API_BASE_URL` | 任意(未設定時はモック実装を使用) | TRAiN APIのベースURL(例: `https://api.train.example.com`)。設定すると、一般的なREST慣例に基づく暫定エンドポイント(`GET {base}/api/members/{id}/servers` 等)へリクエストする実HTTPクライアント(`HttpTrainApiClient`)を使用します。実際のAPI仕様確定後、エンドポイント形式の見直しが必要になる可能性があります |
+
+例(PowerShellで `cargo tauri dev` の前に設定):
+```powershell
+$env:TRAIN_LAUNCHER_API_BASE_URL = "https://api.train.example.com"
+npm run dev
+```
+
 ### ワークスペース構成
 
 ```
@@ -101,7 +115,7 @@ crates/
   core/            # train-launcher-core: プロファイル管理、MCバージョンマニフェスト/ライブラリ/アセットのダウンロード、起動コマンド構築
   auth/            # train-launcher-auth: MSA/XboxLive/Minecraft 認証チェーン、Discord OAuth2
   mods/            # train-launcher-mods: Modrinth/CurseForge からの Mod 解決・依存関係自動解決・インストール
-  train-api/       # train-launcher-server-api: TRAiN 独自バックエンドAPIクライアント(現時点ではトレイト+モックのスタブ実装)
+  train-api/       # train-launcher-server-api: TRAiN 独自バックエンドAPIクライアント(トレイト+モック実装+暫定HTTPクライアント。API仕様未確定のためエンドポイント形式は暫定)
 apps/
   desktop/         # Tauri アプリ本体(上記 crate を呼び出す Tauri commands を定義)
 frontend/          # React + Vite + TypeScript + Fluent UI React v9 (`@fluentui/react-components`) 製フロントエンド
@@ -109,7 +123,7 @@ frontend/          # React + Vite + TypeScript + Fluent UI React v9 (`@fluentui/
 
 ### 補足
 
-- MSA/Discord 認証フロー(`crates/auth`)は実装済みです。Minecraft 本体の起動処理、Mod 依存解決・ダウンロード、TRAiN 独自APIの実装は今後のタスクで対応予定です
+- MSA/Discord 認証フロー(`crates/auth`)、Minecraft本体の起動処理(Fabric/Forge等Modローダー導入済みプロファイルの起動含む)、Mod 依存解決・ダウンロード(`crates/mods`)は実装済みです。TRAiN 独自APIはHTTPクライアント実装済みですが、実際のAPI仕様が未確定のためエンドポイント形式は暫定です(`TRAIN_LAUNCHER_API_BASE_URL` 参照)
 - Windows で `cargo build` 時に MSVC ヘッダ(`vcruntime.h` 等)が見つからないエラーが出る場合は、Visual Studio Installer で「C++ によるデスクトップ開発」ワークロードが正しくインストールされているか確認してください
 
 ## ステータス

@@ -269,21 +269,20 @@ async fn list_minecraft_versions(
         .map_err(|err| err.to_string())
 }
 
-/// Discordサインイン後の所属サーバー一覧を取得する(TRAiN API未実装のため、モック実装を使用)。
+/// Discordサインイン後の所属サーバー一覧を取得する。
 ///
-/// TODO: TRAiN API仕様確定後、`MockTrainApiClient` を実際のHTTPクライアント実装に置き換える。
+/// 環境変数 `TRAIN_LAUNCHER_API_BASE_URL` が設定されていれば実際のTRAiN APIへ、未設定なら
+/// モック実装(`MockTrainApiClient`)へフォールバックする(`train_launcher_server_api::create_client`)。
 #[tauri::command]
 async fn list_member_servers() -> Result<Vec<train_launcher_server_api::MemberServer>, String> {
-    use train_launcher_server_api::{MockTrainApiClient, TrainApiClient};
-
     let discord_token = store::load_token(Provider::Discord)
         .map_err(|err| err.to_string())?
         .ok_or_else(|| "Discordアカウントでサインインしてください".to_string())?;
     // TODO: TRAiN API仕様確定後、Discordの実ユーザーIDをトークンに保持して使用する
     // (現状は表示名を仮のユーザー識別子として使っている)。
-    let discord_user_id = discord_token.display_name.unwrap_or_default();
+    let discord_user_id = discord_token.display_name.clone().unwrap_or_default();
 
-    let client = MockTrainApiClient;
+    let client = train_launcher_server_api::create_client(Some(discord_token.access_token));
     client
         .get_member_servers(&discord_user_id)
         .await
@@ -575,7 +574,7 @@ async fn launch_profile(
             }
         });
 
-    train_launcher_core::download::download_version_files(
+    let resolved_version = train_launcher_core::download::download_version_files(
         &profile.minecraft_version,
         &launcher_root,
         on_progress,
@@ -599,9 +598,10 @@ async fn launch_profile(
         access_token: token.access_token,
     };
 
-    let mut child = train_launcher_core::launch::launch(&profile, &launcher_root, &auth)
-        .await
-        .map_err(|err| err.to_string())?;
+    let mut child =
+        train_launcher_core::launch::launch(&profile, &resolved_version, &launcher_root, &auth)
+            .await
+            .map_err(|err| err.to_string())?;
 
     // ホーム画面の「最近使ったプロファイル」表示用に最終起動日時を記録する。
     // 記録に失敗してもゲーム自体の起動は継続させたいため、エラーはログ出力のみに留める。
@@ -657,7 +657,6 @@ async fn join_train_server(
     use train_launcher_mods::resolver::{
         download_resolved_file, resolve_dependencies, ModReference, ResolveFilter,
     };
-    use train_launcher_server_api::{MockTrainApiClient, TrainApiClient};
 
     let _ = app_handle.emit(
         LAUNCH_PROGRESS_EVENT,
@@ -669,7 +668,10 @@ async fn join_train_server(
         },
     );
 
-    let client = MockTrainApiClient;
+    let discord_access_token = store::load_token(Provider::Discord)
+        .map_err(|err| err.to_string())?
+        .map(|record| record.access_token);
+    let client = train_launcher_server_api::create_client(discord_access_token);
     let server_config = client
         .get_server_config(&server_id)
         .await

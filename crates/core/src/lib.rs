@@ -30,8 +30,8 @@ mod error {
         Zip(#[from] zip::result::ZipError),
         #[error("version not found in manifest: {0}")]
         VersionNotFound(String),
-        #[error("version files not downloaded yet: {0} (run download_version_files first)")]
-        VersionNotDownloaded(String),
+        #[error("local version json is incomplete and has no inheritsFrom: {0}")]
+        IncompleteVersionJson(String),
         #[error("downloaded file hash mismatch for {url}: expected {expected}, actual {actual}")]
         HashMismatch {
             url: String,

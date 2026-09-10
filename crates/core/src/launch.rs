@@ -1,8 +1,9 @@
 //! 起動コマンド(JVM引数・クラスパス・ゲーム引数)の構築とプロセス起動。
 //!
-//! `download::download_version_files` で対象バージョンをダウンロード済みであることが前提
-//! (キャッシュされたバージョンJSONを読み込んで引数を組み立てるため、事前ダウンロードなしで
-//! 呼び出すと `CoreError::VersionNotDownloaded` を返す)。
+//! `download::download_version_files` で対象バージョンをダウンロード済みであることが前提。
+//! その戻り値([`crate::version_manifest::ResolvedVersion`]、エイリアス解決・Mod
+//! ローダー継承マージ済みの完全なバージョン情報)をそのまま本モジュールの関数に渡すこと
+//! (ディスク上のキャッシュJSONは再読み込みしない)。
 //!
 //! Minecraft自体はMicrosoftアカウントでのサインインが必須のため、`LaunchAuth` は常にMSA経由
 //! (Xbox Live/XSTSを経てMinecraftトークンへ変換済み)のユーザー名・UUID・アクセストークンを
@@ -16,7 +17,7 @@ use tokio::process::{Child, Command};
 use crate::paths::LauncherPaths;
 use crate::profile::Profile;
 use crate::rules::{rules_allow, CurrentPlatform};
-use crate::version_manifest::{ArgumentEntry, ArgumentValue, VersionDetails};
+use crate::version_manifest::{ArgumentEntry, ArgumentValue, ResolvedVersion, VersionDetails};
 use crate::CoreError;
 
 /// 起動に必要な認証情報(Minecraftトークンへ変換済みのもの)。
@@ -28,21 +29,21 @@ pub struct LaunchAuth {
 }
 
 /// プロファイルからMinecraft起動コマンド(実行ファイル + 引数)を構築する。
+///
+/// `resolved_version` は [`crate::download::download_version_files`] の戻り値をそのまま渡す
+/// (エイリアス解決・Fabric/Forge等のModローダー継承マージが完了した完全な情報)。
 pub fn build_launch_command(
     profile: &Profile,
+    resolved_version: &ResolvedVersion,
     launcher_root: &Path,
     auth: &LaunchAuth,
 ) -> Result<Vec<String>, CoreError> {
     let paths = LauncherPaths::new(launcher_root);
-    let version_id = &profile.minecraft_version;
-
-    let version_json_path = paths.version_json_path(version_id);
-    let json_bytes = std::fs::read(&version_json_path)
-        .map_err(|_| CoreError::VersionNotDownloaded(version_id.clone()))?;
-    let details: VersionDetails = serde_json::from_slice(&json_bytes)?;
+    let version_id = &resolved_version.id;
+    let details = &resolved_version.details;
 
     let platform = CurrentPlatform::detect();
-    let classpath = build_classpath(&paths, version_id, &details, platform)?;
+    let classpath = build_classpath(&paths, version_id, details, platform)?;
     let natives_dir = paths.natives_dir(version_id).display().to_string();
 
     let mut placeholders: HashMap<&str, String> = HashMap::new();
@@ -192,10 +193,11 @@ fn substitute(template: &str, placeholders: &HashMap<&str, String>) -> String {
 /// 起動済みの `tokio::process::Child` をそのまま返す。
 pub async fn launch(
     profile: &Profile,
+    resolved_version: &ResolvedVersion,
     launcher_root: &Path,
     auth: &LaunchAuth,
 ) -> Result<Child, CoreError> {
-    let command = build_launch_command(profile, launcher_root, auth)?;
+    let command = build_launch_command(profile, resolved_version, launcher_root, auth)?;
     let (program, args) = command
         .split_first()
         .ok_or_else(|| CoreError::InvalidLaunchCommand("launch command is empty".to_string()))?;

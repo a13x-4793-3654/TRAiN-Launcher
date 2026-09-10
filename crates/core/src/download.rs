@@ -18,7 +18,7 @@ use tokio::sync::Semaphore;
 
 use crate::paths::LauncherPaths;
 use crate::rules::{rules_allow, CurrentPlatform};
-use crate::version_manifest::{self, Artifact, VersionDetails, VersionEntry};
+use crate::version_manifest::{self, Artifact, VersionDetails, VersionSource};
 use crate::CoreError;
 
 /// 同時ダウンロード数の上限(アセットは数千個に及ぶため、際限なく並行実行しない)。
@@ -108,11 +108,23 @@ async fn download_verified(
 /// `destination` はランチャーのルートディレクトリ(`.minecraft` 相当)であり、
 /// `versions/` `libraries/` `assets/` の各サブディレクトリを内部で解決する。
 /// `on_progress` にはフェーズごとの進捗が随時通知される(呼び出し側はこれをUIへ反映できる)。
+///
+/// `version_id` には次のいずれも指定できる(解決は [`version_manifest::resolve_version`] に
+/// 委ねる):
+/// - 通常のバニラバージョンID(例: `"1.21.1"`)
+/// - `"latest-release"`/`"latest-snapshot"` エイリアス
+/// - Fabric/Forge等、Modローダー導入済みのバージョンID(例:
+///   `"fabric-loader-0.19.5-1.21.1"`)。ローダー自体が事前に導入済みで、
+///   `<destination>/versions/<id>/<id>.json` がローカルに存在することが前提。
+///
+/// 戻り値の [`ResolvedVersion::id`] は解決後の実際のバージョンID(エイリアス解決済み)を返す。
+/// 呼び出し側は以降の起動処理([`crate::launch::launch`] 等)に、この解決結果
+/// (`ResolvedVersion`)をそのまま渡すこと。
 pub async fn download_version_files(
     version_id: &str,
     destination: &Path,
     on_progress: ProgressCallback,
-) -> Result<(), CoreError> {
+) -> Result<version_manifest::ResolvedVersion, CoreError> {
     let paths = LauncherPaths::new(destination);
     let platform = CurrentPlatform::detect();
     let client = reqwest::Client::new();
@@ -122,10 +134,7 @@ pub async fn download_version_files(
         completed: 0,
         total: 1,
     });
-    let manifest = version_manifest::fetch_version_manifest().await?;
-    let entry: &VersionEntry = version_manifest::find_version(&manifest, version_id)
-        .ok_or_else(|| CoreError::VersionNotFound(version_id.to_string()))?;
-    let details = version_manifest::fetch_version_details(entry).await?;
+    let resolved = version_manifest::resolve_version(version_id, &paths).await?;
     on_progress(DownloadProgress {
         phase: DownloadPhase::FetchingManifest,
         completed: 1,
@@ -133,28 +142,45 @@ pub async fn download_version_files(
     });
 
     // 起動時にMojangへ再問い合わせしなくて済むよう、バージョンJSONをキャッシュしておく。
-    let version_json_path = paths.version_json_path(version_id);
-    if let Some(parent) = version_json_path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
+    // Modローダー導入済みバージョン(`VersionSource::Local`)の場合、この元ファイルは
+    // 公式ランチャーやローダーのインストーラが管理しているため上書きしない
+    // (マージ結果は呼び出し側にメモリ上で返すのみとする)。
+    if resolved.source == VersionSource::Manifest {
+        let version_json_path = paths.version_json_path(&resolved.id);
+        if let Some(parent) = version_json_path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        tokio::fs::write(
+            &version_json_path,
+            serde_json::to_vec_pretty(&resolved.details)?,
+        )
+        .await?;
     }
-    tokio::fs::write(&version_json_path, serde_json::to_vec_pretty(&details)?).await?;
 
     on_progress(DownloadProgress {
         phase: DownloadPhase::ClientJar,
         completed: 0,
         total: 1,
     });
-    download_client_jar(&client, &paths, version_id, &details).await?;
+    download_client_jar(&client, &paths, &resolved.id, &resolved.details).await?;
     on_progress(DownloadProgress {
         phase: DownloadPhase::ClientJar,
         completed: 1,
         total: 1,
     });
 
-    download_libraries(&client, &paths, version_id, &details, platform, &on_progress).await?;
-    download_assets(&client, &paths, &details, &on_progress).await?;
+    download_libraries(
+        &client,
+        &paths,
+        &resolved.id,
+        &resolved.details,
+        platform,
+        &on_progress,
+    )
+    .await?;
+    download_assets(&client, &paths, &resolved.details, &on_progress).await?;
 
-    Ok(())
+    Ok(resolved)
 }
 
 async fn download_client_jar(

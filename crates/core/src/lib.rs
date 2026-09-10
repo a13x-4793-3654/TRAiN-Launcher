@@ -9,6 +9,7 @@ pub mod launcher_profiles;
 pub mod paths;
 pub mod profile;
 pub mod rules;
+pub mod settings;
 pub mod version_manifest;
 
 pub use error::CoreError;

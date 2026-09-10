@@ -219,6 +219,20 @@ fn get_auth_status() -> Result<AuthStatus, String> {
     })
 }
 
+/// アプリ全体の設定(Javaパス/ゲームディレクトリの上書き)を取得する。
+#[tauri::command]
+fn get_app_settings() -> Result<train_launcher_core::settings::AppSettings, String> {
+    train_launcher_core::settings::load_settings().map_err(|err| err.to_string())
+}
+
+/// アプリ全体の設定を保存する。
+#[tauri::command]
+fn save_app_settings(
+    settings: train_launcher_core::settings::AppSettings,
+) -> Result<(), String> {
+    train_launcher_core::settings::save_settings(&settings).map_err(|err| err.to_string())
+}
+
 /// 保存済みプロファイル一覧を取得する。
 #[tauri::command]
 fn list_profiles() -> Result<Vec<train_launcher_core::profile::Profile>, String> {
@@ -309,6 +323,13 @@ fn optional_curseforge_api_key() -> Option<String> {
     train_launcher_mods::config::curseforge_api_key_from_env().ok()
 }
 
+/// 実際に使用するゲームディレクトリを返す。設定画面で上書きされていればそちらを、
+/// なければ公式Minecraft Launcherと共有する既定の `.minecraft` 相当ディレクトリを返す。
+fn minecraft_root() -> std::path::PathBuf {
+    let settings = train_launcher_core::settings::load_settings().unwrap_or_default();
+    train_launcher_core::paths::effective_minecraft_root(settings.game_directory.as_deref())
+}
+
 /// 指定ディレクトリ内のファイル名一覧を返す(ディレクトリが存在しない場合は空リスト)。
 async fn list_directory_files(dir: &std::path::Path) -> Result<Vec<String>, String> {
     if !dir.exists() {
@@ -393,7 +414,7 @@ async fn install_mod(
     .await
     .map_err(|err| err.to_string())?;
 
-    let dest_dir = train_launcher_core::paths::default_minecraft_root().join("mods");
+    let dest_dir = minecraft_root().join("mods");
     let mut installed = Vec::new();
     for file in &resolved {
         download_resolved_file(file, &dest_dir)
@@ -407,14 +428,14 @@ async fn install_mod(
 /// インストール済みMod(`.minecraft/mods` 直下のファイル)一覧を返す。
 #[tauri::command]
 async fn list_installed_mods() -> Result<Vec<String>, String> {
-    let dir = train_launcher_core::paths::default_minecraft_root().join("mods");
+    let dir = minecraft_root().join("mods");
     list_directory_files(&dir).await
 }
 
 /// インストール済みModを削除する。
 #[tauri::command]
 async fn remove_installed_mod(filename: String) -> Result<(), String> {
-    let dir = train_launcher_core::paths::default_minecraft_root().join("mods");
+    let dir = minecraft_root().join("mods");
     remove_installed_file(&dir, &filename).await
 }
 
@@ -426,7 +447,7 @@ async fn install_resource_pack(
     url: String,
     minecraft_version: Option<String>,
 ) -> Result<String, String> {
-    let dest_dir = train_launcher_core::paths::default_minecraft_root().join("resourcepacks");
+    let dest_dir = minecraft_root().join("resourcepacks");
     let path = train_launcher_mods::resource_pack::install_from_url(
         &url,
         minecraft_version.as_deref(),
@@ -446,14 +467,14 @@ async fn install_resource_pack(
 /// インストール済みリソースパック(`.minecraft/resourcepacks` 直下のファイル)一覧を返す。
 #[tauri::command]
 async fn list_installed_resource_packs() -> Result<Vec<String>, String> {
-    let dir = train_launcher_core::paths::default_minecraft_root().join("resourcepacks");
+    let dir = minecraft_root().join("resourcepacks");
     list_directory_files(&dir).await
 }
 
 /// インストール済みリソースパックを削除する。
 #[tauri::command]
 async fn remove_installed_resource_pack(filename: String) -> Result<(), String> {
-    let dir = train_launcher_core::paths::default_minecraft_root().join("resourcepacks");
+    let dir = minecraft_root().join("resourcepacks");
     remove_installed_file(&dir, &filename).await
 }
 
@@ -520,6 +541,15 @@ async fn launch_profile(
     app_handle: AppHandle,
     profile: train_launcher_core::profile::Profile,
 ) -> Result<(), String> {
+    let mut profile = profile;
+    if profile.java_path.is_none() {
+        // プロファイルにJavaパスの指定が無い場合、設定画面で指定された既定のJavaパスを使う
+        // (それも未指定ならPATH上の `java` を使う、という解決順は `launch::build_launch_command`
+        // 側で行う)。
+        let settings = train_launcher_core::settings::load_settings().unwrap_or_default();
+        profile.java_path = settings.java_path;
+    }
+
     let token = store::load_token(Provider::Microsoft)
         .map_err(|err| err.to_string())?
         .ok_or_else(|| "Microsoftアカウントでサインインしてください".to_string())?;
@@ -534,7 +564,7 @@ async fn launch_profile(
 
     // 公式Minecraft Launcherと同じ `.minecraft` 相当のディレクトリを共有する
     // (二重ダウンロードを避け、どちらのランチャーからでも同じファイルを再利用できるようにする)。
-    let launcher_root = train_launcher_core::paths::default_minecraft_root();
+    let launcher_root = minecraft_root();
 
     let progress_handle = app_handle.clone();
     let on_progress: train_launcher_core::download::ProgressCallback =
@@ -676,7 +706,7 @@ async fn join_train_server(
             .await
             .map_err(|err| err.to_string())?;
 
-        let dest_dir = train_launcher_core::paths::default_minecraft_root().join("mods");
+        let dest_dir = minecraft_root().join("mods");
         let total = resolved.len();
         for (index, file) in resolved.iter().enumerate() {
             let _ = app_handle.emit(
@@ -695,7 +725,7 @@ async fn join_train_server(
     }
 
     if !server_config.resource_pack_urls.is_empty() {
-        let dest_dir = train_launcher_core::paths::default_minecraft_root().join("resourcepacks");
+        let dest_dir = minecraft_root().join("resourcepacks");
         let total = server_config.resource_pack_urls.len();
         for (index, url) in server_config.resource_pack_urls.iter().enumerate() {
             let _ = app_handle.emit(
@@ -746,6 +776,8 @@ pub fn run() {
             remove_installed_resource_pack,
             launch_minecraft,
             join_train_server,
+            get_app_settings,
+            save_app_settings,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

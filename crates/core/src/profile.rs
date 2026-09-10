@@ -18,7 +18,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::launcher_profiles::{self, OfficialProfile};
-use crate::paths::{default_launcher_root, default_minecraft_root};
+use crate::paths::{default_launcher_root, effective_minecraft_root};
 use crate::CoreError;
 
 /// プロファイルの管理元。
@@ -58,6 +58,12 @@ pub struct Profile {
 
 fn profiles_file_path() -> std::path::PathBuf {
     default_launcher_root().join("profiles.json")
+}
+
+/// 設定で上書きされていればその値を、なければ既定の `.minecraft` 相当ディレクトリを返す。
+fn minecraft_root() -> std::path::PathBuf {
+    let settings = crate::settings::load_settings().unwrap_or_default();
+    effective_minecraft_root(settings.game_directory.as_deref())
 }
 
 fn load_all() -> Result<Vec<Profile>, CoreError> {
@@ -115,7 +121,7 @@ fn official_to_profile(official: OfficialProfile) -> Profile {
 /// TRAiN Launcherのプロファイルを公式ランチャーの `launcher_profiles.json` にも反映する。
 /// 失敗してもTRAiN側の保存自体は失敗させたくないため、エラーはログ出力のみに留める。
 fn sync_to_official_launcher(profile: &Profile) {
-    if let Err(err) = launcher_profiles::upsert_profile(&default_minecraft_root(), profile) {
+    if let Err(err) = launcher_profiles::upsert_profile(&minecraft_root(), profile) {
         eprintln!("failed to sync profile to launcher_profiles.json: {err}");
     }
 }
@@ -130,7 +136,7 @@ pub fn list_profiles() -> Result<Vec<Profile>, CoreError> {
     let known_ids: std::collections::HashSet<String> =
         profiles.iter().map(|profile| profile.id.clone()).collect();
 
-    for official in launcher_profiles::read_all(&default_minecraft_root())? {
+    for official in launcher_profiles::read_all(&minecraft_root())? {
         if !known_ids.contains(&official.id) {
             profiles.push(official_to_profile(official));
         }
@@ -156,7 +162,7 @@ pub fn get_profile(id: &str) -> Result<Profile, CoreError> {
     if let Some(profile) = load_all()?.into_iter().find(|profile| profile.id == id) {
         return Ok(profile);
     }
-    let official = launcher_profiles::read_all(&default_minecraft_root())?
+    let official = launcher_profiles::read_all(&minecraft_root())?
         .into_iter()
         .find(|official| official.id == id);
     match official {
@@ -191,7 +197,7 @@ pub fn delete_profile(id: &str) -> Result<(), CoreError> {
         save_all(&profiles)?;
     }
 
-    let removed_from_official = launcher_profiles::remove_profile(&default_minecraft_root(), id)
+    let removed_from_official = launcher_profiles::remove_profile(&minecraft_root(), id)
         .unwrap_or_else(|err| {
             eprintln!("failed to remove profile from launcher_profiles.json: {err}");
             false

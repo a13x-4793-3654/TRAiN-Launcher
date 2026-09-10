@@ -109,3 +109,16 @@ pub fn default_minecraft_root() -> PathBuf {
             .join(".minecraft")
     }
 }
+
+/// 実際に使用するゲームディレクトリを解決する。
+///
+/// `override_dir` (設定画面で指定された [`crate::settings::AppSettings::game_directory`])
+/// が指定されていればそれを、未指定または空文字列の場合は [`default_minecraft_root`] を返す。
+/// この上書き先を使う場合、公式Minecraft Launcherとのファイル共有・
+/// `launcher_profiles.json` 連携は行われなくなる点に注意(上書き先は独自ディレクトリのため)。
+pub fn effective_minecraft_root(override_dir: Option<&str>) -> PathBuf {
+    match override_dir.map(str::trim) {
+        Some(dir) if !dir.is_empty() => PathBuf::from(dir),
+        _ => default_minecraft_root(),
+    }
+}

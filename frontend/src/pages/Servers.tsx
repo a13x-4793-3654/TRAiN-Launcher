@@ -17,9 +17,10 @@ import {
   makeStyles,
   tokens,
 } from "@fluentui/react-components";
-import { PlayRegular } from "@fluentui/react-icons";
+import { PlayRegular, InfoRegular } from "@fluentui/react-icons";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { ServerDetailPage } from "./ServerDetail";
 
 const TOASTER_ID = "servers-toaster";
 const GAME_EXITED_EVENT = "game://exited";
@@ -74,6 +75,9 @@ const useStyles = makeStyles({
  * `list_member_servers` から取得して表示する。各サーバーの「起動」ボタンを押すと
  * `join_train_server` を呼び出し、サーバー専用プロファイルの自動作成/更新、
  * Mod・リソースパックの自動導入、Minecraftの起動までを一括で行う。
+ * 「詳細」ボタンを押すと、参加前に接続先・Mod構成などを確認できる
+ * 「所属サーバー詳細」画面(`ServerDetailPage`)に切り替わる(参加/起動処理自体は
+ * 引き続きこのコンポーネントが一元管理し、詳細画面へは `onJoin` として渡す)。
  * 進行状況は `launch://progress` イベントを購読して進捗バーで表示する
  * (`Profiles.tsx` の起動フローと同じパターン)。
  */
@@ -90,6 +94,9 @@ export function ServersPage() {
 
   const [launchingId, setLaunchingId] = useState<string | null>(null);
   const [progress, setProgress] = useState<LaunchProgressPayload | null>(
+    null,
+  );
+  const [selectedServer, setSelectedServer] = useState<MemberServer | null>(
     null,
   );
 
@@ -175,72 +182,93 @@ export function ServersPage() {
 
   return (
     <div>
-      <Title2 as="h2" block>
-        サーバー
-      </Title2>
-      <Body1 as="p" block>
-        Discordでサインインすると、所属しているTRAiNサーバーの設定を自動取得します。
-      </Body1>
-
-      {authLoading ? (
-        <Spinner size="small" label="読み込み中..." />
-      ) : !discordSignedIn ? (
-        <Body1 as="p" block>
-          Discordでサインインしてください。サインインすると、所属しているTRAiN
-          サーバーの一覧が表示されます。
-        </Body1>
-      ) : serversLoading ? (
-        <Spinner size="small" label="サーバー一覧を取得中..." />
-      ) : serversError ? (
-        <Body1 as="p" block>
-          サーバー一覧の取得に失敗しました: {serversError}
-        </Body1>
-      ) : servers.length === 0 ? (
-        <Body1 as="p" block>
-          所属しているTRAiNサーバーが見つかりませんでした。
-        </Body1>
+      {selectedServer ? (
+        <ServerDetailPage
+          server={selectedServer}
+          onBack={() => setSelectedServer(null)}
+          onJoin={() => handleJoin(selectedServer)}
+          joining={launchingId === selectedServer.id}
+          progress={progress}
+        />
       ) : (
-        <div className={styles.list}>
-          {servers.map((server) => (
-            <Card key={server.id}>
-              <CardHeader
-                header={<Text weight="semibold">{server.name}</Text>}
-                description={<Caption1>{server.id}</Caption1>}
-                action={
-                  <div className={styles.cardActions}>
-                    <Button
-                      appearance="primary"
-                      size="small"
-                      icon={
-                        launchingId === server.id ? (
-                          <Spinner size="tiny" />
-                        ) : (
-                          <PlayRegular />
-                        )
-                      }
-                      disabled={launchingId !== null}
-                      onClick={() => handleJoin(server)}
-                    >
-                      起動
-                    </Button>
-                  </div>
-                }
-              />
-              {launchingId === server.id && (
-                <div className={styles.progressArea}>
-                  <ProgressBar
-                    value={
-                      progress && progress.total > 0
-                        ? progress.completed / progress.total
-                        : undefined
+        <>
+          <Title2 as="h2" block>
+            サーバー
+          </Title2>
+          <Body1 as="p" block>
+            Discordでサインインすると、所属しているTRAiNサーバーの設定を自動取得します。
+          </Body1>
+
+          {authLoading ? (
+            <Spinner size="small" label="読み込み中..." />
+          ) : !discordSignedIn ? (
+            <Body1 as="p" block>
+              Discordでサインインしてください。サインインすると、所属しているTRAiN
+              サーバーの一覧が表示されます。
+            </Body1>
+          ) : serversLoading ? (
+            <Spinner size="small" label="サーバー一覧を取得中..." />
+          ) : serversError ? (
+            <Body1 as="p" block>
+              サーバー一覧の取得に失敗しました: {serversError}
+            </Body1>
+          ) : servers.length === 0 ? (
+            <Body1 as="p" block>
+              所属しているTRAiNサーバーが見つかりませんでした。
+            </Body1>
+          ) : (
+            <div className={styles.list}>
+              {servers.map((server) => (
+                <Card key={server.id}>
+                  <CardHeader
+                    header={<Text weight="semibold">{server.name}</Text>}
+                    description={<Caption1>{server.id}</Caption1>}
+                    action={
+                      <div className={styles.cardActions}>
+                        <Button
+                          appearance="secondary"
+                          size="small"
+                          icon={<InfoRegular />}
+                          disabled={launchingId !== null}
+                          onClick={() => setSelectedServer(server)}
+                        >
+                          詳細
+                        </Button>
+                        <Button
+                          appearance="primary"
+                          size="small"
+                          icon={
+                            launchingId === server.id ? (
+                              <Spinner size="tiny" />
+                            ) : (
+                              <PlayRegular />
+                            )
+                          }
+                          disabled={launchingId !== null}
+                          onClick={() => handleJoin(server)}
+                        >
+                          起動
+                        </Button>
+                      </div>
                     }
                   />
-                  <Caption1>{progress?.phase_label ?? "準備中..."}</Caption1>
-                </div>
-              )}
-            </Card>
-          ))}
-        </div>
+                  {launchingId === server.id && (
+                    <div className={styles.progressArea}>
+                      <ProgressBar
+                        value={
+                          progress && progress.total > 0
+                            ? progress.completed / progress.total
+                            : undefined
+                        }
+                      />
+                      <Caption1>{progress?.phase_label ?? "準備中..."}</Caption1>
+                    </div>
+                  )}
+                </Card>
+              ))}
+            </div>
+          )}
+        </>
       )}
 
       <Toaster toasterId={TOASTER_ID} />

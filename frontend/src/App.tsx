@@ -97,8 +97,9 @@ const useStyles = makeStyles({
 type NavKey = "home" | "servers" | "profiles" | "mods" | "settings";
 export type { NavKey };
 
-// TODO: サインイン実装後、この4画面に加えて「所属サーバー詳細」「Mod導入ウィザード」等の
-// サブ画面を追加する。現時点ではプレースホルダーの切り替えのみ。
+// 「所属サーバー詳細」は`ServersPage`内のサブ画面(`ServerDetail.tsx`)として、
+// 「Mod導入ウィザード」は`ModsPage`から開くダイアログ(`ModWizard.tsx`)として実装済み。
+// どちらもナビゲーションタブ自体は増やさず、既存画面内で完結する。
 function AppShell() {
   const styles = useStyles();
   const [selected, setSelected] = useState<NavKey>("home");

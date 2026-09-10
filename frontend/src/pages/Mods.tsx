@@ -28,8 +28,10 @@ import {
   SearchRegular,
   ArrowDownloadRegular,
   DeleteRegular,
+  WandRegular,
 } from "@fluentui/react-icons";
 import { invoke } from "@tauri-apps/api/core";
+import { ModInstallWizardDialog } from "./ModWizard";
 
 const TOASTER_ID = "mods-toaster";
 
@@ -86,6 +88,9 @@ const useStyles = makeStyles({
     marginTop: tokens.spacingVerticalM,
     maxWidth: "480px",
   },
+  wizardRow: {
+    marginTop: tokens.spacingVerticalM,
+  },
 });
 
 /**
@@ -104,6 +109,8 @@ function InstallPanel(props: {
   installReturnsList: boolean;
   /** 対象プロファイルID。`null` の場合は全プロファイル共通のディレクトリを対象とする。 */
   profileId: string | null;
+  /** この値が変化するたびに導入済み一覧を再取得する(ウィザードでの一括導入後の更新用)。 */
+  refreshSignal?: number;
 }) {
   const styles = useStyles();
   const { dispatchToast } = useToastController(TOASTER_ID);
@@ -135,7 +142,7 @@ function InstallPanel(props: {
   };
 
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(refreshInstalled, [props.profileId]);
+  useEffect(refreshInstalled, [props.profileId, props.refreshSignal]);
 
   const handleResolve = () => {
     if (!url.trim() || !props.resolveCommand) {
@@ -339,7 +346,9 @@ function InstallPanel(props: {
  * 導入する。導入先は対象プロファイル選択欄で選んだプロファイル専用のゲームディレクトリ
  * (未設定の場合は公式Minecraft Launcherと共有する `.minecraft`
  * フォルダ)。「共通(全プロファイル)」を選ぶと、専用ゲームディレクトリを持たない
- * プロファイル全てに適用される既定の場所を対象にする。CurseForgeのURLを解決するには
+ * プロファイル全てに適用される既定の場所を対象にする。「複数のModをまとめて導入」
+ * ボタンから、複数URLを一括で解決・導入できる「Mod導入ウィザード」(`ModWizard.tsx`)も
+ * 開ける。CurseForgeのURLを解決するには
  * 環境変数 `TRAIN_LAUNCHER_CURSEFORGE_API_KEY` の設定が必要(README参照)。
  */
 export function ModsPage() {
@@ -348,6 +357,8 @@ export function ModsPage() {
 
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [selectedProfile, setSelectedProfile] = useState<string>(SHARED_PROFILE);
+  const [wizardOpen, setWizardOpen] = useState(false);
+  const [modsRefreshSignal, setModsRefreshSignal] = useState(0);
 
   useEffect(() => {
     invoke<Profile[]>("list_profiles")
@@ -378,6 +389,16 @@ export function ModsPage() {
         Modrinth・CurseForgeのURLを指定してMod・リソースパックを導入します。
         依存Modも自動的に解決してまとめて導入します。
       </Body1>
+
+      <div className={styles.wizardRow}>
+        <Button
+          appearance="secondary"
+          icon={<WandRegular />}
+          onClick={() => setWizardOpen(true)}
+        >
+          複数のModをまとめて導入(ウィザード)
+        </Button>
+      </div>
 
       <Field
         label={
@@ -415,6 +436,7 @@ export function ModsPage() {
         removeCommand="remove_installed_mod"
         installReturnsList={true}
         profileId={profileId}
+        refreshSignal={modsRefreshSignal}
       />
 
       <InstallPanel
@@ -429,6 +451,12 @@ export function ModsPage() {
       />
 
       <div className={styles.section} />
+      <ModInstallWizardDialog
+        open={wizardOpen}
+        onOpenChange={setWizardOpen}
+        profileId={profileId}
+        onInstalled={() => setModsRefreshSignal((value) => value + 1)}
+      />
       <Toaster toasterId={TOASTER_ID} />
     </div>
   );

@@ -313,6 +313,23 @@ async fn list_member_servers() -> Result<Vec<train_launcher_server_api::MemberSe
         .map_err(|err| err.to_string())
 }
 
+/// 指定サーバーの設定(接続先・Minecraftバージョン・Modローダー・Mod/リソースパックURL一覧)
+/// を取得する(「所属サーバー詳細」画面用。参加前にMod構成を確認できるようにする)。
+#[tauri::command]
+async fn get_server_config(
+    server_id: String,
+) -> Result<train_launcher_server_api::ServerConfig, String> {
+    let discord_access_token = store::load_token(Provider::Discord)
+        .map_err(|err| err.to_string())?
+        .map(|record| record.access_token);
+    let client = train_launcher_server_api::create_client(discord_access_token);
+    client
+        .get_server_config(&server_id)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+
 /// フロントエンドへ返す、解決済みMod/リソースパックファイルの情報。
 #[derive(Debug, Clone, Serialize)]
 struct ResolvedModPayload {
@@ -425,6 +442,83 @@ async fn resolve_mod_url(
         .enumerate()
         .map(|(index, file)| ResolvedModPayload::from((index > 0, file)))
         .collect())
+}
+
+/// 複数URLをまとめて解決する(「Mod導入ウィザード」用)。URLごとに依存関係を解決した上で、
+/// 提供元+プロジェクトIDが重複するファイル(同じMod・共通の依存Modなど)は1件にまとめる。
+///
+/// 戻り値は、いずれかのURLに対して直接指定されたファイルは `is_dependency: false`、
+/// 依存関係としてのみ解決されたファイルは `is_dependency: true` となる。
+async fn resolve_mod_urls_merged(
+    urls: &[String],
+    minecraft_version: Option<&str>,
+) -> Result<Vec<(bool, train_launcher_mods::resolver::ResolvedFile)>, String> {
+    use std::collections::HashSet;
+    use train_launcher_mods::resolver::{resolve_dependencies, ModReference, ResolveFilter};
+
+    let filter = ResolveFilter {
+        minecraft_version: minecraft_version.map(|value| value.to_string()),
+        mod_loader: None,
+    };
+    let curseforge_api_key = optional_curseforge_api_key();
+
+    let mut merged = Vec::new();
+    let mut seen = HashSet::new();
+    for url in urls {
+        let resolved = resolve_dependencies(
+            vec![ModReference { url: url.clone() }],
+            &filter,
+            curseforge_api_key.as_deref(),
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+
+        for (index, file) in resolved.into_iter().enumerate() {
+            let key = (file.provider, file.project_id.clone());
+            if !seen.insert(key) {
+                continue;
+            }
+            merged.push((index > 0, file));
+        }
+    }
+    Ok(merged)
+}
+
+/// 複数URLをまとめて解決する(プレビューのみ、ダウンロードは行わない)。
+/// 「Mod導入ウィザード」で、複数のModを一括で導入内容の確認をする際に使用する。
+#[tauri::command]
+async fn resolve_mod_urls(
+    urls: Vec<String>,
+    minecraft_version: Option<String>,
+) -> Result<Vec<ResolvedModPayload>, String> {
+    let merged = resolve_mod_urls_merged(&urls, minecraft_version.as_deref()).await?;
+    Ok(merged.into_iter().map(ResolvedModPayload::from).collect())
+}
+
+/// 複数URLをまとめてインストールする(「Mod導入ウィザード」用)。依存関係も含めて
+/// ダウンロードし、重複するファイルは1回だけダウンロードする。
+///
+/// `profile_id` が指定されている場合はそのプロファイル専用のゲームディレクトリへ、
+/// 未指定の場合は全プロファイル共通の `.minecraft/mods` ディレクトリへインストールする
+/// ([`resolve_game_dir`])。
+#[tauri::command]
+async fn install_mods(
+    urls: Vec<String>,
+    minecraft_version: Option<String>,
+    profile_id: Option<String>,
+) -> Result<Vec<String>, String> {
+    use train_launcher_mods::resolver::download_resolved_file;
+
+    let merged = resolve_mod_urls_merged(&urls, minecraft_version.as_deref()).await?;
+    let dest_dir = resolve_game_dir(profile_id.as_deref())?.join("mods");
+    let mut installed = Vec::new();
+    for (_, file) in &merged {
+        download_resolved_file(file, &dest_dir)
+            .await
+            .map_err(|err| err.to_string())?;
+        installed.push(file.filename.clone());
+    }
+    Ok(installed)
 }
 
 /// URL指定でModをインストールする(依存Modも含めてダウンロードする)。
@@ -889,8 +983,11 @@ pub fn run() {
             list_supported_mod_loaders,
             list_mod_loader_versions,
             list_member_servers,
+            get_server_config,
             resolve_mod_url,
+            resolve_mod_urls,
             install_mod,
+            install_mods,
             list_installed_mods,
             remove_installed_mod,
             install_resource_pack,

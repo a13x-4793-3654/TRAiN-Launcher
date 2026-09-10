@@ -1,6 +1,6 @@
-//! TRAiN API のダミーデータモデル。
+//! TRAiN API のデータモデル。
 //!
-//! API仕様確定後、実際のレスポンス形式に合わせて更新する想定。
+//! TRAiNバックエンド側 `docs/LAUNCHER-API.md` のレスポンス形式と一致させている。
 
 use serde::{Deserialize, Serialize};
 

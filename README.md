@@ -100,11 +100,11 @@ npm run dev
 
 ### TRAiN 独自バックエンドAPIを試すための環境変数
 
-TRAiN側の正式なAPI仕様は未確定です。以下の環境変数が未設定の場合、常にダミーデータを返すモック実装(`MockTrainApiClient`)にフォールバックします。実際のTRAiNバックエンドが用意できた場合のみ設定してください。
+TRAiN側のAPI仕様は確定済みです(TRAiNリポジトリの `docs/LAUNCHER-API.md` 参照)。以下の環境変数が未設定の場合、常にダミーデータを返すモック実装(`MockTrainApiClient`)にフォールバックします。実際のTRAiNバックエンド(Webサーバー機能が有効なもの)が用意できた場合に設定してください。
 
 | 環境変数 | 必須 | 説明 |
 | --- | --- | --- |
-| `TRAIN_LAUNCHER_API_BASE_URL` | 任意(未設定時はモック実装を使用) | TRAiN APIのベースURL(例: `https://api.train.example.com`)。設定すると、一般的なREST慣例に基づく暫定エンドポイント(`GET {base}/api/members/{id}/servers` 等)へリクエストする実HTTPクライアント(`HttpTrainApiClient`)を使用します。実際のAPI仕様確定後、エンドポイント形式の見直しが必要になる可能性があります |
+| `TRAIN_LAUNCHER_API_BASE_URL` | 任意(未設定時はモック実装を使用) | TRAiN APIのベースURL(例: `https://train.example.com`)。設定すると、`GET {base}/api/members/{discord_user_id}/servers` / `GET {base}/api/servers/{server_id}/config` へリクエストする実HTTPクライアント(`HttpTrainApiClient`)を使用します。認証はDiscordアクセストークンをBearerとして送るだけでよく(TRAiN側がDiscord APIへ問い合わせて本人確認する)、追加設定は不要です |
 
 例(PowerShellで `cargo tauri dev` の前に設定):
 ```powershell
@@ -120,7 +120,7 @@ crates/
   core/            # train-launcher-core: プロファイル管理、MCバージョンマニフェスト/ライブラリ/アセットのダウンロード、起動コマンド構築
   auth/            # train-launcher-auth: MSA/XboxLive/Minecraft 認証チェーン、Discord OAuth2
   mods/            # train-launcher-mods: Modrinth/CurseForge からの Mod 解決・依存関係自動解決・インストール
-  train-api/       # train-launcher-server-api: TRAiN 独自バックエンドAPIクライアント(トレイト+モック実装+暫定HTTPクライアント。API仕様未確定のためエンドポイント形式は暫定)
+  train-api/       # train-launcher-server-api: TRAiN 独自バックエンドAPIクライアント(トレイト+モック実装+HTTPクライアント。エンドポイント形式はTRAiN側 docs/LAUNCHER-API.md で確定済み)
 apps/
   desktop/         # Tauri アプリ本体(上記 crate を呼び出す Tauri commands を定義)
 frontend/          # React + Vite + TypeScript + Fluent UI React v9 (`@fluentui/react-components`) 製フロントエンド
@@ -128,7 +128,7 @@ frontend/          # React + Vite + TypeScript + Fluent UI React v9 (`@fluentui/
 
 ### 補足
 
-- MSA/Discord 認証フロー(`crates/auth`)、Minecraft本体の起動処理(`crates/core`、Fabric/Quilt/Forge/NeoForgeの自動導入込み)、Mod 依存解決・ダウンロード(`crates/mods`)は実装済みです。TRAiN 独自APIはHTTPクライアント実装済みですが、実際のAPI仕様が未確定のためエンドポイント形式は暫定です(`TRAIN_LAUNCHER_API_BASE_URL` 参照)
+- MSA/Discord 認証フロー(`crates/auth`)、Minecraft本体の起動処理(`crates/core`、Fabric/Quilt/Forge/NeoForgeの自動導入込み)、Mod 依存解決・ダウンロード(`crates/mods`)は実装済みです。TRAiN 独自APIもエンドポイント形式・認証方式が確定済みで実装済みです(`TRAIN_LAUNCHER_API_BASE_URL` 参照)。ただし、サーバー管理者が `minecraft-mods manifest`(または `apply`)を一度もTRAiN Link経由で送っていないサーバーは設定未登録として扱われ、参加はできません
 - Forge/NeoForge の自動導入にはインストーラjarの実行に Java (JRE/JDK) が必要です。設定画面またはプロファイルで指定したJavaパス(未指定時はPATH上の `java`)が使われます
 - Windows で `cargo build` 時に MSVC ヘッダ(`vcruntime.h` 等)が見つからないエラーが出る場合は、Visual Studio Installer で「C++ によるデスクトップ開発」ワークロードが正しくインストールされているか確認してください
 

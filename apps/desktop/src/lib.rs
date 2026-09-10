@@ -48,6 +48,7 @@ async fn sign_in_with_discord(app_handle: AppHandle) -> Result<SignInResult, Str
             expires_at: token.expires_at,
             display_name: Some(token.username.clone()),
             uuid: None,
+            user_id: Some(token.user_id.clone()),
         },
     )
     .map_err(|err| err.to_string())?;
@@ -178,6 +179,7 @@ async fn sign_in_with_microsoft(app_handle: AppHandle) -> Result<SignInResult, S
             expires_at: msa_token.expires_at,
             display_name: Some(display_name.clone()),
             uuid: minecraft_token.uuid,
+            user_id: None,
         },
     )
     .map_err(|err| err.to_string())?;
@@ -302,9 +304,14 @@ async fn list_member_servers() -> Result<Vec<train_launcher_server_api::MemberSe
     let discord_token = store::load_token(Provider::Discord)
         .map_err(|err| err.to_string())?
         .ok_or_else(|| "Discordアカウントでサインインしてください".to_string())?;
-    // TODO: TRAiN API仕様確定後、Discordの実ユーザーIDをトークンに保持して使用する
-    // (現状は表示名を仮のユーザー識別子として使っている)。
-    let discord_user_id = discord_token.display_name.clone().unwrap_or_default();
+    // Discordの実ユーザーID(スノーフレークID)を使う。本フィールド追加前にサインインして
+    // 保存されたトークンには`user_id`が無いため、その場合のみ表示名にフォールバックする
+    // (再サインインすれば`user_id`が保存され、以降はこちらが使われる)。
+    let discord_user_id = discord_token
+        .user_id
+        .clone()
+        .or_else(|| discord_token.display_name.clone())
+        .unwrap_or_default();
 
     let client = train_launcher_server_api::create_client(Some(discord_token.access_token));
     client

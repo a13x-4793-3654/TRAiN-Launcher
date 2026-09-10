@@ -49,6 +49,12 @@ struct TokenMeta {
     /// Minecraftプレイヤーとしての UUID (Microsoftプロバイダのみ)。
     /// `crates/core` のゲーム起動時に `auth_uuid` 起動引数として使用する。
     uuid: Option<String>,
+    /// プロバイダ側の安定したユーザーID(DiscordのスノーフレークIDなど)。
+    /// TRAiN APIへの問い合わせ時に表示名ではなくこちらを使う。
+    /// 本フィールド追加前に保存されたレコードには存在しないため `#[serde(default)]` で
+    /// 後方互換を保つ。
+    #[serde(default)]
+    user_id: Option<String>,
 }
 
 /// 保存対象のトークン情報。アクセストークン/リフレッシュトークン/有効期限(UNIX秒)に加え、
@@ -64,6 +70,12 @@ pub struct TokenRecord {
     /// Minecraftプレイヤーとしての UUID (Microsoftプロバイダのみ、ゲーム起動に必要)。
     #[serde(default)]
     pub uuid: Option<String>,
+    /// プロバイダ側の安定したユーザーID(DiscordのスノーフレークIDなど)。表示名と異なり
+    /// 一意性が保証されるため、TRAiN APIへのユーザー識別に使う。
+    /// 本フィールド追加前に保存されたレコードには存在しないため `#[serde(default)]` で
+    /// 後方互換を保つ(その場合は`None`になる)。
+    #[serde(default)]
+    pub user_id: Option<String>,
 }
 
 /// トークンを資格情報ストアに保存する(既存エントリは上書き)。
@@ -79,6 +91,7 @@ pub fn save_token(provider: Provider, record: &TokenRecord) -> Result<(), AuthEr
         expires_at: record.expires_at,
         display_name: record.display_name.clone(),
         uuid: record.uuid.clone(),
+        user_id: record.user_id.clone(),
     };
     let meta_entry = keyring::Entry::new(SERVICE_NAME, provider.keyring_user_meta())?;
     meta_entry.set_password(&serde_json::to_string(&meta)?)?;
@@ -109,6 +122,7 @@ pub fn load_token(provider: Provider) -> Result<Option<TokenRecord>, AuthError> 
         expires_at: meta.expires_at,
         display_name: meta.display_name,
         uuid: meta.uuid,
+        user_id: meta.user_id,
     }))
 }
 

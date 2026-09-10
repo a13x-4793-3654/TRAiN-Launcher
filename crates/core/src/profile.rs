@@ -54,6 +54,16 @@ pub struct Profile {
     /// TRAiNの所属サーバーから自動取得したプロファイルの場合、そのサーバーID。
     #[serde(default)]
     pub server_id: Option<String>,
+    /// このプロファイル専用のゲームディレクトリ(Mod・リソースパック・セーブデータ・
+    /// `options.txt` 等の実際の保存先)。未指定の場合は全プロファイル共通の `.minecraft`
+    /// 相当ディレクトリ([`crate::paths::effective_minecraft_root`])を使う。
+    ///
+    /// バージョンjar・ライブラリ・アセットは指定の有無に関わらず常に共通ディレクトリ側を
+    /// 再利用する(ディスク容量節約のため、これらはこのフィールドの影響を受けない)。
+    /// 公式Minecraft Launcherの `launcher_profiles.json` が持つ同名の `gameDir` 概念と
+    /// 対応しており、双方向に同期される。
+    #[serde(default)]
+    pub game_dir: Option<String>,
     /// 未指定の場合はPATH上の `java` を使用する。
     #[serde(default)]
     pub java_path: Option<String>,
@@ -66,6 +76,22 @@ pub struct Profile {
     /// 未起動の場合は `None`。
     #[serde(default)]
     pub last_launched_at: Option<String>,
+}
+
+impl Profile {
+    /// Mod・リソースパック・セーブデータ等の実際の保存先ディレクトリを解決する。
+    ///
+    /// `game_dir` が指定されていればそれを、未指定(または空文字列)の場合は
+    /// `shared_minecraft_root`(全プロファイル共通の `.minecraft` 相当ディレクトリ)を返す。
+    /// バージョンjar・ライブラリ・アセットの解決には使わないこと
+    /// (それらは常に `shared_minecraft_root` 側、[`crate::launch::build_launch_command`]
+    /// 参照)。
+    pub fn effective_game_dir(&self, shared_minecraft_root: &std::path::Path) -> std::path::PathBuf {
+        match self.game_dir.as_deref().map(str::trim) {
+            Some(dir) if !dir.is_empty() => std::path::PathBuf::from(dir),
+            _ => shared_minecraft_root.to_path_buf(),
+        }
+    }
 }
 
 fn profiles_file_path() -> std::path::PathBuf {
@@ -125,6 +151,7 @@ fn official_to_profile(official: OfficialProfile) -> Profile {
         mod_loader: None,
         mod_loader_version: None,
         server_id: None,
+        game_dir: official.game_dir,
         java_path: official.java_dir,
         max_memory_mb,
         source: ProfileSource::Official,
@@ -241,4 +268,50 @@ pub fn mark_launched(id: &str) -> Result<(), CoreError> {
         }
     }
     save_all(&profiles)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    fn sample_profile(game_dir: Option<&str>) -> Profile {
+        Profile {
+            id: "test".to_string(),
+            name: "test".to_string(),
+            minecraft_version: "1.20.4".to_string(),
+            mod_loader: None,
+            mod_loader_version: None,
+            server_id: None,
+            game_dir: game_dir.map(str::to_string),
+            java_path: None,
+            max_memory_mb: None,
+            source: ProfileSource::Train,
+            last_launched_at: None,
+        }
+    }
+
+    #[test]
+    fn effective_game_dir_falls_back_to_shared_root_when_unset() {
+        let profile = sample_profile(None);
+        let shared_root = Path::new("/shared/.minecraft");
+        assert_eq!(profile.effective_game_dir(shared_root), shared_root);
+    }
+
+    #[test]
+    fn effective_game_dir_falls_back_to_shared_root_when_blank() {
+        let profile = sample_profile(Some("   "));
+        let shared_root = Path::new("/shared/.minecraft");
+        assert_eq!(profile.effective_game_dir(shared_root), shared_root);
+    }
+
+    #[test]
+    fn effective_game_dir_uses_override_when_set() {
+        let profile = sample_profile(Some("/custom/profile-dir"));
+        let shared_root = Path::new("/shared/.minecraft");
+        assert_eq!(
+            profile.effective_game_dir(shared_root),
+            Path::new("/custom/profile-dir")
+        );
+    }
 }

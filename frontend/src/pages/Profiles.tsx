@@ -4,6 +4,7 @@ import {
   Title2,
   Field,
   Input,
+  InfoLabel,
   Button,
   Spinner,
   ProgressBar,
@@ -33,9 +34,11 @@ import {
   EditRegular,
   DeleteRegular,
   PlayRegular,
+  FolderOpenRegular,
 } from "@fluentui/react-icons";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { open } from "@tauri-apps/plugin-dialog";
 
 const TOASTER_ID = "profiles-toaster";
 const GAME_EXITED_EVENT = "game://exited";
@@ -48,6 +51,7 @@ interface Profile {
   mod_loader: string | null;
   mod_loader_version: string | null;
   server_id: string | null;
+  game_dir: string | null;
   java_path: string | null;
   max_memory_mb: number | null;
   source: "train" | "official";
@@ -95,6 +99,7 @@ interface ProfileFormState {
   minecraftVersion: string;
   modLoader: string; // NO_MOD_LOADER の場合は保存時に null に変換する
   modLoaderVersion: string; // 空文字列の場合は自動選択(推奨/最新)として保存時に null に変換する
+  gameDir: string; // 空文字列の場合は共通の.minecraftフォルダとして保存時に null に変換する
   javaPath: string;
   maxMemoryMb: string;
   // 編集時に既存の最終起動日時を保持したまま保存するための値(フォーム上には表示しない)。
@@ -107,6 +112,7 @@ const EMPTY_FORM: ProfileFormState = {
   minecraftVersion: "",
   modLoader: NO_MOD_LOADER,
   modLoaderVersion: "",
+  gameDir: "",
   javaPath: "",
   maxMemoryMb: "",
   lastLaunchedAt: null,
@@ -142,6 +148,15 @@ const useStyles = makeStyles({
     flexDirection: "column",
     gap: tokens.spacingVerticalM,
     minWidth: "360px",
+  },
+  pathRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: tokens.spacingHorizontalXS,
+  },
+  pathInput: {
+    flexGrow: 1,
+    minWidth: 0,
   },
   dialogActions: {
     display: "flex",
@@ -275,6 +290,7 @@ export function ProfilesPage() {
       minecraftVersion: profile.minecraft_version,
       modLoader: profile.mod_loader ?? NO_MOD_LOADER,
       modLoaderVersion: profile.mod_loader_version ?? "",
+      gameDir: profile.game_dir ?? "",
       javaPath: profile.java_path ?? "",
       maxMemoryMb:
         profile.max_memory_mb != null ? String(profile.max_memory_mb) : "",
@@ -287,6 +303,28 @@ export function ProfilesPage() {
     } else {
       setLoaderVersions([]);
     }
+  };
+
+  const handleBrowseGameDir = () => {
+    open({
+      multiple: false,
+      directory: true,
+      title: "ゲームディレクトリを選択",
+    })
+      .then((selected) => {
+        if (typeof selected === "string") {
+          setForm((f) => ({ ...f, gameDir: selected }));
+        }
+      })
+      .catch((err) =>
+        dispatchToast(
+          <Toast>
+            <ToastTitle>フォルダーの選択に失敗しました</ToastTitle>
+            <ToastBody>{String(err)}</ToastBody>
+          </Toast>,
+          { intent: "error" },
+        ),
+      );
   };
 
   const handleSubmit = () => {
@@ -319,6 +357,7 @@ export function ProfilesPage() {
           ? null
           : form.modLoaderVersion.trim() || null,
       server_id: null,
+      game_dir: form.gameDir.trim() || null,
       java_path: form.javaPath.trim() || null,
       max_memory_mb: maxMemoryMb,
       // TRAiN側で作成/編集した時点でTRAiN管理のプロファイルとなる
@@ -459,6 +498,9 @@ export function ProfilesPage() {
                     {profile.java_path ? ` ・ Java: ${profile.java_path}` : ""}
                     {profile.max_memory_mb
                       ? ` ・ 最大メモリ: ${profile.max_memory_mb}MB`
+                      : ""}
+                    {profile.game_dir
+                      ? ` ・ フォルダ: ${profile.game_dir}`
                       : ""}
                     {profile.source === "official"
                       ? " ・ 公式ランチャーから取り込み"
@@ -639,6 +681,31 @@ export function ProfilesPage() {
                   </Combobox>
                 </Field>
               )}
+              <Field
+                label={
+                  <InfoLabel info="未指定の場合は全プロファイル共通の.minecraftフォルダ(公式Minecraft Launcherと共有)を使用します。指定すると、このプロファイルのMod・リソースパック・セーブデータ等は独立したフォルダで管理されます(バージョンjar・ライブラリ・アセットは引き続き共通ディレクトリを再利用します)">
+                    ゲームディレクトリ(任意)
+                  </InfoLabel>
+                }
+              >
+                <div className={styles.pathRow}>
+                  <Input
+                    className={styles.pathInput}
+                    value={form.gameDir}
+                    onChange={(_event, data) =>
+                      setForm((f) => ({ ...f, gameDir: data.value }))
+                    }
+                    placeholder="例: D:\Games\minecraft-profiles\my-profile"
+                  />
+                  <Button
+                    appearance="secondary"
+                    icon={<FolderOpenRegular />}
+                    onClick={handleBrowseGameDir}
+                  >
+                    参照...
+                  </Button>
+                </div>
+              </Field>
               <Field
                 label="Javaパス(任意)"
                 hint="未指定の場合はPATH上のjavaを使用します"

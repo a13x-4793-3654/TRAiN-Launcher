@@ -32,10 +32,15 @@ pub struct LaunchAuth {
 ///
 /// `resolved_version` は [`crate::download::download_version_files`] の戻り値をそのまま渡す
 /// (エイリアス解決・Fabric/Forge等のModローダー継承マージが完了した完全な情報)。
+/// `game_dir` はMod・リソースパック・セーブデータ等の実際の保存先
+/// ([`Profile::effective_game_dir`] で解決したもの)。バージョンjar・ライブラリ・アセットは
+/// 引き続き `launcher_root` 側([`LauncherPaths`])を参照するため、`game_dir` の値に
+/// 関わらず共通ディレクトリが再利用される。
 pub fn build_launch_command(
     profile: &Profile,
     resolved_version: &ResolvedVersion,
     launcher_root: &Path,
+    game_dir: &Path,
     auth: &LaunchAuth,
 ) -> Result<Vec<String>, CoreError> {
     let paths = LauncherPaths::new(launcher_root);
@@ -49,7 +54,7 @@ pub fn build_launch_command(
     let mut placeholders: HashMap<&str, String> = HashMap::new();
     placeholders.insert("auth_player_name", auth.username.clone());
     placeholders.insert("version_name", details.id.clone());
-    placeholders.insert("game_directory", paths.root().display().to_string());
+    placeholders.insert("game_directory", game_dir.display().to_string());
     placeholders.insert("assets_root", paths.assets_dir().display().to_string());
     placeholders.insert("assets_index_name", details.assets.clone());
     placeholders.insert("auth_uuid", auth.uuid.clone());
@@ -183,22 +188,26 @@ fn substitute(template: &str, placeholders: &HashMap<&str, String>) -> String {
 
 /// 構築したコマンドでMinecraftプロセスを起動する。
 ///
+/// `game_dir` はプロセスの作業ディレクトリとして使う(存在しない場合は事前に作成する)。
 /// 呼び出し元が終了を待つか(あるいはログを継続的に読み取るか)判断できるよう、
 /// 起動済みの `tokio::process::Child` をそのまま返す。
 pub async fn launch(
     profile: &Profile,
     resolved_version: &ResolvedVersion,
     launcher_root: &Path,
+    game_dir: &Path,
     auth: &LaunchAuth,
 ) -> Result<Child, CoreError> {
-    let command = build_launch_command(profile, resolved_version, launcher_root, auth)?;
+    let command = build_launch_command(profile, resolved_version, launcher_root, game_dir, auth)?;
     let (program, args) = command
         .split_first()
         .ok_or_else(|| CoreError::InvalidLaunchCommand("launch command is empty".to_string()))?;
 
+    tokio::fs::create_dir_all(game_dir).await?;
+
     let child = Command::new(program)
         .args(args)
-        .current_dir(LauncherPaths::new(launcher_root).root())
+        .current_dir(game_dir)
         .spawn()?;
     Ok(child)
 }

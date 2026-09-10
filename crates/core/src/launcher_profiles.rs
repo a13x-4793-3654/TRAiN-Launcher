@@ -28,6 +28,9 @@ pub struct OfficialProfile {
     pub last_version_id: Option<String>,
     pub java_dir: Option<String>,
     pub java_args: Option<String>,
+    /// このプロファイル専用のゲームディレクトリ上書き(公式ランチャー側の `gameDir`)。
+    /// 未指定の場合は公式ランチャーの既定の `.minecraft` を使う。
+    pub game_dir: Option<String>,
 }
 
 /// `launcher_profiles.json` の `profiles` セクションを読み込む。
@@ -64,12 +67,17 @@ pub fn read_all(minecraft_root: &Path) -> Result<Vec<OfficialProfile>, CoreError
             .get("javaArgs")
             .and_then(Value::as_str)
             .map(str::to_string);
+        let game_dir = value
+            .get("gameDir")
+            .and_then(Value::as_str)
+            .map(str::to_string);
         result.push(OfficialProfile {
             id: id.clone(),
             name,
             last_version_id,
             java_dir,
             java_args,
+            game_dir,
         });
     }
     Ok(result)
@@ -109,6 +117,9 @@ pub fn upsert_profile(minecraft_root: &Path, profile: &crate::profile::Profile) 
     }
     if let Some(max_memory_mb) = profile.max_memory_mb {
         entry["javaArgs"] = json!(format!("-Xmx{max_memory_mb}M -Xms{max_memory_mb}M"));
+    }
+    if let Some(game_dir) = &profile.game_dir {
+        entry["gameDir"] = json!(game_dir);
     }
 
     profiles.insert(profile.id.clone(), entry);

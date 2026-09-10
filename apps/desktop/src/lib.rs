@@ -353,6 +353,22 @@ fn minecraft_root() -> std::path::PathBuf {
     train_launcher_core::paths::effective_minecraft_root(settings.game_directory.as_deref())
 }
 
+/// Mod・リソースパックのインストール先ディレクトリを解決する。
+///
+/// `profile_id` が指定されている場合はそのプロファイルの
+/// [`train_launcher_core::profile::Profile::effective_game_dir`] を、未指定の場合は
+/// 全プロファイル共通の `.minecraft` 相当ディレクトリ([`minecraft_root`])を返す。
+fn resolve_game_dir(profile_id: Option<&str>) -> Result<std::path::PathBuf, String> {
+    match profile_id {
+        Some(id) => {
+            let profile =
+                train_launcher_core::profile::get_profile(id).map_err(|err| err.to_string())?;
+            Ok(profile.effective_game_dir(&minecraft_root()))
+        }
+        None => Ok(minecraft_root()),
+    }
+}
+
 /// 指定ディレクトリ内のファイル名一覧を返す(ディレクトリが存在しない場合は空リスト)。
 async fn list_directory_files(dir: &std::path::Path) -> Result<Vec<String>, String> {
     if !dir.exists() {
@@ -413,13 +429,14 @@ async fn resolve_mod_url(
 
 /// URL指定でModをインストールする(依存Modも含めてダウンロードする)。
 ///
-/// インストール先は公式Minecraft Launcherと共有する `.minecraft/mods` ディレクトリ。
-/// **注意**: 現時点ではプロファイルごとに独立したゲームディレクトリを持たないため、
-/// インストールしたModは全プロファイル共通で適用される。
+/// `profile_id` が指定されている場合はそのプロファイル専用のゲームディレクトリへ、
+/// 未指定の場合は全プロファイル共通の `.minecraft/mods` ディレクトリへインストールする
+/// ([`resolve_game_dir`])。
 #[tauri::command]
 async fn install_mod(
     url: String,
     minecraft_version: Option<String>,
+    profile_id: Option<String>,
 ) -> Result<Vec<String>, String> {
     use train_launcher_mods::resolver::{
         download_resolved_file, resolve_dependencies, ModReference, ResolveFilter,
@@ -437,7 +454,7 @@ async fn install_mod(
     .await
     .map_err(|err| err.to_string())?;
 
-    let dest_dir = minecraft_root().join("mods");
+    let dest_dir = resolve_game_dir(profile_id.as_deref())?.join("mods");
     let mut installed = Vec::new();
     for file in &resolved {
         download_resolved_file(file, &dest_dir)
@@ -448,29 +465,37 @@ async fn install_mod(
     Ok(installed)
 }
 
-/// インストール済みMod(`.minecraft/mods` 直下のファイル)一覧を返す。
+/// インストール済みMod(`mods` 直下のファイル)一覧を返す。
+/// `profile_id` 省略時は全プロファイル共通のディレクトリを参照する。
 #[tauri::command]
-async fn list_installed_mods() -> Result<Vec<String>, String> {
-    let dir = minecraft_root().join("mods");
+async fn list_installed_mods(profile_id: Option<String>) -> Result<Vec<String>, String> {
+    let dir = resolve_game_dir(profile_id.as_deref())?.join("mods");
     list_directory_files(&dir).await
 }
 
-/// インストール済みModを削除する。
+/// インストール済みModを削除する。`profile_id` 省略時は全プロファイル共通のディレクトリを
+/// 参照する。
 #[tauri::command]
-async fn remove_installed_mod(filename: String) -> Result<(), String> {
-    let dir = minecraft_root().join("mods");
+async fn remove_installed_mod(
+    filename: String,
+    profile_id: Option<String>,
+) -> Result<(), String> {
+    let dir = resolve_game_dir(profile_id.as_deref())?.join("mods");
     remove_installed_file(&dir, &filename).await
 }
 
 /// URL指定でリソースパックをインストールする。
 ///
-/// インストール先は公式Minecraft Launcherと共有する `.minecraft/resourcepacks` ディレクトリ。
+/// `profile_id` が指定されている場合はそのプロファイル専用のゲームディレクトリへ、
+/// 未指定の場合は全プロファイル共通の `.minecraft/resourcepacks` ディレクトリへ
+/// インストールする([`resolve_game_dir`])。
 #[tauri::command]
 async fn install_resource_pack(
     url: String,
     minecraft_version: Option<String>,
+    profile_id: Option<String>,
 ) -> Result<String, String> {
-    let dest_dir = minecraft_root().join("resourcepacks");
+    let dest_dir = resolve_game_dir(profile_id.as_deref())?.join("resourcepacks");
     let path = train_launcher_mods::resource_pack::install_from_url(
         &url,
         minecraft_version.as_deref(),
@@ -487,17 +512,24 @@ async fn install_resource_pack(
         .to_string())
 }
 
-/// インストール済みリソースパック(`.minecraft/resourcepacks` 直下のファイル)一覧を返す。
+/// インストール済みリソースパック(`resourcepacks` 直下のファイル)一覧を返す。
+/// `profile_id` 省略時は全プロファイル共通のディレクトリを参照する。
 #[tauri::command]
-async fn list_installed_resource_packs() -> Result<Vec<String>, String> {
-    let dir = minecraft_root().join("resourcepacks");
+async fn list_installed_resource_packs(
+    profile_id: Option<String>,
+) -> Result<Vec<String>, String> {
+    let dir = resolve_game_dir(profile_id.as_deref())?.join("resourcepacks");
     list_directory_files(&dir).await
 }
 
-/// インストール済みリソースパックを削除する。
+/// インストール済みリソースパックを削除する。`profile_id` 省略時は全プロファイル共通の
+/// ディレクトリを参照する。
 #[tauri::command]
-async fn remove_installed_resource_pack(filename: String) -> Result<(), String> {
-    let dir = minecraft_root().join("resourcepacks");
+async fn remove_installed_resource_pack(
+    filename: String,
+    profile_id: Option<String>,
+) -> Result<(), String> {
+    let dir = resolve_game_dir(profile_id.as_deref())?.join("resourcepacks");
     remove_installed_file(&dir, &filename).await
 }
 
@@ -656,10 +688,16 @@ async fn launch_profile(
         access_token: token.access_token,
     };
 
-    let mut child =
-        train_launcher_core::launch::launch(&profile, &resolved_version, &launcher_root, &auth)
-            .await
-            .map_err(|err| err.to_string())?;
+    let game_dir = profile.effective_game_dir(&launcher_root);
+    let mut child = train_launcher_core::launch::launch(
+        &profile,
+        &resolved_version,
+        &launcher_root,
+        &game_dir,
+        &auth,
+    )
+    .await
+    .map_err(|err| err.to_string())?;
 
     // ホーム画面の「最近使ったプロファイル」表示用に最終起動日時を記録する。
     // 記録に失敗してもゲーム自体の起動は継続させたいため、エラーはログ出力のみに留める。
@@ -737,6 +775,15 @@ async fn join_train_server(
 
     // サーバーごとに固定のプロファイルIDを使う(再度参加した場合は同じプロファイルを更新し、
     // サーバー側の設定変更をそのまま反映する)。
+    // TRAiNサーバーごとに要求されるMod構成は異なるため、サーバーごとに専用のゲーム
+    // ディレクトリを自動割り当てし、他のサーバー/プロファイルとMod・リソースパックが
+    // 混在しないようにする(バージョンjar・ライブラリ・アセットは引き続き共通ディレクトリを
+    // 再利用する)。
+    let game_dir = train_launcher_core::paths::default_launcher_root()
+        .join("server-profiles")
+        .join(&server_id)
+        .display()
+        .to_string();
     let profile = Profile {
         id: format!("train-{server_id}"),
         name: server_name,
@@ -746,6 +793,7 @@ async fn join_train_server(
         // 常に最新の安定版を自動選択する。
         mod_loader_version: None,
         server_id: Some(server_id),
+        game_dir: Some(game_dir),
         java_path: None,
         max_memory_mb: None,
         source: ProfileSource::Train,
@@ -765,6 +813,7 @@ async fn join_train_server(
         mod_loader: server_config.mod_loader.clone(),
     };
     let curseforge_api_key = optional_curseforge_api_key();
+    let profile_game_dir = profile.effective_game_dir(&minecraft_root());
 
     if !server_config.mod_urls.is_empty() {
         let references = server_config
@@ -776,7 +825,7 @@ async fn join_train_server(
             .await
             .map_err(|err| err.to_string())?;
 
-        let dest_dir = minecraft_root().join("mods");
+        let dest_dir = profile_game_dir.join("mods");
         let total = resolved.len();
         for (index, file) in resolved.iter().enumerate() {
             let _ = app_handle.emit(
@@ -795,7 +844,7 @@ async fn join_train_server(
     }
 
     if !server_config.resource_pack_urls.is_empty() {
-        let dest_dir = minecraft_root().join("resourcepacks");
+        let dest_dir = profile_game_dir.join("resourcepacks");
         let total = server_config.resource_pack_urls.len();
         for (index, url) in server_config.resource_pack_urls.iter().enumerate() {
             let _ = app_handle.emit(

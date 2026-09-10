@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 import {
   Body1,
-  Caption1,
   Title2,
   Title3,
   Field,
@@ -12,6 +11,8 @@ import {
   Text,
   Card,
   CardHeader,
+  Dropdown,
+  Option,
   MessageBar,
   MessageBarBody,
   MessageBarTitle,
@@ -31,6 +32,14 @@ import {
 import { invoke } from "@tauri-apps/api/core";
 
 const TOASTER_ID = "mods-toaster";
+
+/** 「共通(全プロファイル)」を表す内部値。呼び出し時は `profileId: null` に変換する。 */
+const SHARED_PROFILE = "__shared__";
+
+interface Profile {
+  id: string;
+  name: string;
+}
 
 interface ResolvedModPayload {
   provider: string;
@@ -73,6 +82,10 @@ const useStyles = makeStyles({
   preview: {
     marginTop: tokens.spacingVerticalM,
   },
+  profileSelector: {
+    marginTop: tokens.spacingVerticalM,
+    maxWidth: "480px",
+  },
 });
 
 /**
@@ -89,6 +102,8 @@ function InstallPanel(props: {
   removeCommand: string;
   /** インストール結果として返る解決済みファイル一覧をどう解釈するか。 */
   installReturnsList: boolean;
+  /** 対象プロファイルID。`null` の場合は全プロファイル共通のディレクトリを対象とする。 */
+  profileId: string | null;
 }) {
   const styles = useStyles();
   const { dispatchToast } = useToastController(TOASTER_ID);
@@ -105,7 +120,7 @@ function InstallPanel(props: {
 
   const refreshInstalled = () => {
     setInstalledLoading(true);
-    invoke<string[]>(props.listCommand)
+    invoke<string[]>(props.listCommand, { profileId: props.profileId })
       .then(setInstalled)
       .catch((err) =>
         dispatchToast(
@@ -120,7 +135,7 @@ function InstallPanel(props: {
   };
 
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(refreshInstalled, []);
+  useEffect(refreshInstalled, [props.profileId]);
 
   const handleResolve = () => {
     if (!url.trim() || !props.resolveCommand) {
@@ -153,6 +168,7 @@ function InstallPanel(props: {
     invoke(props.installCommand, {
       url: url.trim(),
       minecraftVersion: minecraftVersion.trim() || null,
+      profileId: props.profileId,
     })
       .then((result) => {
         const count = props.installReturnsList
@@ -183,7 +199,7 @@ function InstallPanel(props: {
 
   const handleRemove = (filename: string) => {
     setRemoving(filename);
-    invoke(props.removeCommand, { filename })
+    invoke(props.removeCommand, { filename, profileId: props.profileId })
       .then(() => refreshInstalled())
       .catch((err) =>
         dispatchToast(
@@ -320,13 +336,39 @@ function InstallPanel(props: {
  * Mod / リソースパック画面。
  *
  * Modrinth・CurseForgeのURLを指定してMod/リソースパックを解決・依存関係の自動解決込みで
- * 導入する。導入先は公式Minecraft Launcherと共有する `.minecraft/mods`・
- * `.minecraft/resourcepacks` ディレクトリのため、現時点では全プロファイル共通で適用される
- * (プロファイルごとの独立したゲームディレクトリは未対応)。CurseForgeのURLを解決するには
+ * 導入する。導入先は対象プロファイル選択欄で選んだプロファイル専用のゲームディレクトリ
+ * (未設定の場合は公式Minecraft Launcherと共有する `.minecraft`
+ * フォルダ)。「共通(全プロファイル)」を選ぶと、専用ゲームディレクトリを持たない
+ * プロファイル全てに適用される既定の場所を対象にする。CurseForgeのURLを解決するには
  * 環境変数 `TRAIN_LAUNCHER_CURSEFORGE_API_KEY` の設定が必要(README参照)。
  */
 export function ModsPage() {
   const styles = useStyles();
+  const { dispatchToast } = useToastController(TOASTER_ID);
+
+  const [profiles, setProfiles] = useState<Profile[]>([]);
+  const [selectedProfile, setSelectedProfile] = useState<string>(SHARED_PROFILE);
+
+  useEffect(() => {
+    invoke<Profile[]>("list_profiles")
+      .then(setProfiles)
+      .catch((err) =>
+        dispatchToast(
+          <Toast>
+            <ToastTitle>プロファイルの取得に失敗しました</ToastTitle>
+            <ToastBody>{String(err)}</ToastBody>
+          </Toast>,
+          { intent: "error" },
+        ),
+      );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const profileId = selectedProfile === SHARED_PROFILE ? null : selectedProfile;
+  const selectedProfileName =
+    profiles.find((profile) => profile.id === selectedProfile)?.name ??
+    "共通(全プロファイル)";
+
   return (
     <div>
       <Title2 as="h2" block>
@@ -336,10 +378,32 @@ export function ModsPage() {
         Modrinth・CurseForgeのURLを指定してMod・リソースパックを導入します。
         依存Modも自動的に解決してまとめて導入します。
       </Body1>
-      <Caption1 as="p" block>
-        導入先は全プロファイル共通の `.minecraft`
-        フォルダです(プロファイルごとの切り替えには未対応)。
-      </Caption1>
+
+      <Field
+        label={
+          <InfoLabel info="専用ゲームディレクトリを設定していないプロファイルは「共通(全プロファイル)」と同じ場所を参照します">
+            対象プロファイル
+          </InfoLabel>
+        }
+        className={styles.profileSelector}
+      >
+        <Dropdown
+          value={selectedProfileName}
+          selectedOptions={[selectedProfile]}
+          onOptionSelect={(_event, data) =>
+            setSelectedProfile(data.optionValue ?? SHARED_PROFILE)
+          }
+        >
+          <Option key={SHARED_PROFILE} value={SHARED_PROFILE}>
+            共通(全プロファイル)
+          </Option>
+          {profiles.map((profile) => (
+            <Option key={profile.id} value={profile.id} text={profile.name}>
+              {profile.name}
+            </Option>
+          ))}
+        </Dropdown>
+      </Field>
 
       <InstallPanel
         title="Mod"
@@ -350,6 +414,7 @@ export function ModsPage() {
         listCommand="list_installed_mods"
         removeCommand="remove_installed_mod"
         installReturnsList={true}
+        profileId={profileId}
       />
 
       <InstallPanel
@@ -360,6 +425,7 @@ export function ModsPage() {
         listCommand="list_installed_resource_packs"
         removeCommand="remove_installed_resource_pack"
         installReturnsList={false}
+        profileId={profileId}
       />
 
       <div className={styles.section} />

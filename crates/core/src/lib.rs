@@ -2,12 +2,12 @@
 //!
 //! プロファイル管理、Minecraftバージョンマニフェスト/ライブラリ/アセットのダウンロード、
 //! 起動コマンドの構築を担当するコアクレート。
-//!
-//! 現時点ではスキャフォールドのみで、各関数はTODOスタブになっている。
 
 pub mod download;
 pub mod launch;
+pub mod paths;
 pub mod profile;
+pub mod rules;
 pub mod version_manifest;
 
 pub use error::CoreError;
@@ -22,5 +22,27 @@ mod error {
         Io(#[from] std::io::Error),
         #[error("http error: {0}")]
         Http(#[from] reqwest::Error),
+        #[error("json error: {0}")]
+        Json(#[from] serde_json::Error),
+        #[error("zip error: {0}")]
+        Zip(#[from] zip::result::ZipError),
+        #[error("version not found in manifest: {0}")]
+        VersionNotFound(String),
+        #[error("version files not downloaded yet: {0} (run download_version_files first)")]
+        VersionNotDownloaded(String),
+        #[error("downloaded file hash mismatch for {url}: expected {expected}, actual {actual}")]
+        HashMismatch {
+            url: String,
+            expected: String,
+            actual: String,
+        },
+        #[error("invalid library name/path: {0}")]
+        InvalidLibraryName(String),
+        #[error("invalid launch command: {0}")]
+        InvalidLaunchCommand(String),
+        #[error("profile not found: {0}")]
+        ProfileNotFound(String),
+        #[error("profile already exists: {0}")]
+        ProfileAlreadyExists(String),
     }
 }

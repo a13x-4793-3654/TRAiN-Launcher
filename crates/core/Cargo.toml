@@ -8,6 +8,14 @@ description = "TRAiN Launcher: profile management, Minecraft version manifest/li
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "process"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "process", "sync"] }
 reqwest = { version = "0.12", features = ["json"] }
 thiserror = "1"
+# ダウンロードしたファイルの整合性検証(SHA1)に使用。
+sha1 = "0.10"
+# レガシーバージョン(LWJGL2世代)のネイティブライブラリjar展開に使用。
+# bzip2/lzma/zstd等はMinecraftのネイティブjarでは使われないため、C コンパイラ不要な
+# 素のDEFLATE実装(zlib-rs/zopfliはいずれもピュアRust実装)のみを有効化する。
+zip = { version = "2", default-features = false, features = ["deflate"] }
+# プロファイル設定やゲームデータの既定保存先(OS毎のアプリデータディレクトリ)を解決するために使用。
+dirs = "5"

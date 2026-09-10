@@ -19,3 +19,5 @@ sha1 = "0.10"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 # プロファイル設定やゲームデータの既定保存先(OS毎のアプリデータディレクトリ)を解決するために使用。
 dirs = "5"
+# 公式Minecraft Launcherの launcher_profiles.json に書き込む作成/最終使用日時(ISO 8601)に使用。
+chrono = { version = "0.4", default-features = false, features = ["clock"] }

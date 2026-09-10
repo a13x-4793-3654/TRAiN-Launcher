@@ -5,11 +5,34 @@
 //! ユーザーが手動で作成した設定のいずれからも生成できる想定。
 //!
 //! 保存先は `paths::default_launcher_root()` 直下の `profiles.json` (単純なJSON配列)。
+//!
+//! `.minecraft` フォルダは公式Minecraft Launcherと共有しているため
+//! ([`crate::paths::default_minecraft_root`])、プロファイルについても双方向に連携する:
+//! - TRAiN Launcherで作成/更新/削除したプロファイルは、公式ランチャーの
+//!   `launcher_profiles.json` にも反映し、公式ランチャー側の起動構成一覧にも表示されるようにする。
+//! - 逆に公式ランチャー側で作成済みのプロファイルも [`list_profiles`] の結果に取り込み、
+//!   TRAiN Launcher側でも表示・編集・起動できるようにする([`ProfileSource::Official`])。
+//! 公式ランチャー側との連携(`launcher_profiles.json`の読み書き)に失敗しても、TRAiN側の
+//! `profiles.json` への保存自体は成功させる(標準エラー出力にログを残すのみに留める)。
 
 use serde::{Deserialize, Serialize};
 
-use crate::paths::default_launcher_root;
+use crate::launcher_profiles::{self, OfficialProfile};
+use crate::paths::{default_launcher_root, default_minecraft_root};
 use crate::CoreError;
+
+/// プロファイルの管理元。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ProfileSource {
+    /// TRAiN Launcherの `profiles.json` で管理されているプロファイル。
+    #[default]
+    Train,
+    /// 公式Minecraft Launcherの `launcher_profiles.json` にのみ存在し、TRAiN側では
+    /// まだ保存されていないプロファイル(表示専用の取り込みであり、編集/起動すると
+    /// TRAiN側にも取り込まれ`Train`として保存される)。
+    Official,
+}
 
 /// 1つの起動プロファイル。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -29,6 +52,8 @@ pub struct Profile {
     /// JVMヒープ最大値(MB)。未指定の場合は `-Xmx` を付与しない(JVM既定値に任せる)。
     #[serde(default)]
     pub max_memory_mb: Option<u32>,
+    #[serde(default)]
+    pub source: ProfileSource,
 }
 
 fn profiles_file_path() -> std::path::PathBuf {
@@ -52,10 +77,65 @@ fn save_all(profiles: &[Profile]) -> Result<(), CoreError> {
     Ok(())
 }
 
-/// 保存済みプロファイル一覧を取得する。保存ファイルが無い場合は空一覧を返す
-/// (プロファイル未作成は正常な初期状態であり、エラーとして扱わない)。
+/// `javaArgs` 文字列から `-Xmx` 値をMB単位で抽出する(見つからない/解釈できない場合は `None`)。
+/// 例: `"-Xmx4096M -Xms4096M"` → `Some(4096)`、`"-Xmx4G"` → `Some(4096)`。
+fn parse_max_memory_mb(java_args: &str) -> Option<u32> {
+    for token in java_args.split_whitespace() {
+        if let Some(rest) = token.strip_prefix("-Xmx") {
+            if rest.is_empty() {
+                continue;
+            }
+            let (digits, unit) = rest.split_at(rest.len() - 1);
+            if let Ok(value) = digits.parse::<u32>() {
+                match unit.to_ascii_uppercase().as_str() {
+                    "M" => return Some(value),
+                    "G" => return Some(value.saturating_mul(1024)),
+                    _ => {}
+                }
+            }
+        }
+    }
+    None
+}
+
+fn official_to_profile(official: OfficialProfile) -> Profile {
+    let max_memory_mb = official.java_args.as_deref().and_then(parse_max_memory_mb);
+    Profile {
+        id: official.id,
+        name: official.name,
+        minecraft_version: official.last_version_id.unwrap_or_default(),
+        mod_loader: None,
+        server_id: None,
+        java_path: official.java_dir,
+        max_memory_mb,
+        source: ProfileSource::Official,
+    }
+}
+
+/// TRAiN Launcherのプロファイルを公式ランチャーの `launcher_profiles.json` にも反映する。
+/// 失敗してもTRAiN側の保存自体は失敗させたくないため、エラーはログ出力のみに留める。
+fn sync_to_official_launcher(profile: &Profile) {
+    if let Err(err) = launcher_profiles::upsert_profile(&default_minecraft_root(), profile) {
+        eprintln!("failed to sync profile to launcher_profiles.json: {err}");
+    }
+}
+
+/// 保存済みプロファイル一覧を取得する。
+///
+/// TRAiN Launcher自身の `profiles.json` に加えて、公式ランチャーの
+/// `launcher_profiles.json` に存在し、まだTRAiN側に取り込まれていないプロファイルも
+/// (`ProfileSource::Official` として)一覧に含める。
 pub fn list_profiles() -> Result<Vec<Profile>, CoreError> {
-    load_all()
+    let mut profiles = load_all()?;
+    let known_ids: std::collections::HashSet<String> =
+        profiles.iter().map(|profile| profile.id.clone()).collect();
+
+    for official in launcher_profiles::read_all(&default_minecraft_root())? {
+        if !known_ids.contains(&official.id) {
+            profiles.push(official_to_profile(official));
+        }
+    }
+    Ok(profiles)
 }
 
 /// 新規プロファイルを作成する。同じIDが既に存在する場合はエラーを返す。
@@ -64,17 +144,61 @@ pub fn create_profile(profile: Profile) -> Result<(), CoreError> {
     if profiles.iter().any(|existing| existing.id == profile.id) {
         return Err(CoreError::ProfileAlreadyExists(profile.id));
     }
-    profiles.push(profile);
-    save_all(&profiles)
+    profiles.push(profile.clone());
+    save_all(&profiles)?;
+    sync_to_official_launcher(&profile);
+    Ok(())
 }
 
-/// プロファイルを削除する。存在しないIDの場合はエラーを返す。
+/// IDを指定して1件のプロファイルを取得する。TRAiN側に無い場合は公式ランチャー側
+/// (`launcher_profiles.json`)も参照する。どちらにも存在しない場合はエラーを返す。
+pub fn get_profile(id: &str) -> Result<Profile, CoreError> {
+    if let Some(profile) = load_all()?.into_iter().find(|profile| profile.id == id) {
+        return Ok(profile);
+    }
+    let official = launcher_profiles::read_all(&default_minecraft_root())?
+        .into_iter()
+        .find(|official| official.id == id);
+    match official {
+        Some(official) => Ok(official_to_profile(official)),
+        None => Err(CoreError::ProfileNotFound(id.to_string())),
+    }
+}
+
+/// 既存プロファイルを更新する(IDは変更不可)。
+///
+/// 対象IDがTRAiN側の `profiles.json` にまだ存在しない場合(公式ランチャー側のみに
+/// 存在するプロファイルをTRAiN側で編集した場合など)は、新規追加として取り込む。
+pub fn update_profile(profile: Profile) -> Result<(), CoreError> {
+    let mut profiles = load_all()?;
+    match profiles.iter().position(|existing| existing.id == profile.id) {
+        Some(index) => profiles[index] = profile.clone(),
+        None => profiles.push(profile.clone()),
+    }
+    save_all(&profiles)?;
+    sync_to_official_launcher(&profile);
+    Ok(())
+}
+
+/// プロファイルを削除する。TRAiN側・公式ランチャー側のどちらか一方にのみ存在する場合も
+/// 削除する。どちらにも存在しない場合はエラーを返す。
 pub fn delete_profile(id: &str) -> Result<(), CoreError> {
     let mut profiles = load_all()?;
     let original_len = profiles.len();
     profiles.retain(|profile| profile.id != id);
-    if profiles.len() == original_len {
+    let existed_in_train_store = profiles.len() != original_len;
+    if existed_in_train_store {
+        save_all(&profiles)?;
+    }
+
+    let removed_from_official = launcher_profiles::remove_profile(&default_minecraft_root(), id)
+        .unwrap_or_else(|err| {
+            eprintln!("failed to remove profile from launcher_profiles.json: {err}");
+            false
+        });
+
+    if !existed_in_train_store && !removed_from_official {
         return Err(CoreError::ProfileNotFound(id.to_string()));
     }
-    save_all(&profiles)
+    Ok(())
 }

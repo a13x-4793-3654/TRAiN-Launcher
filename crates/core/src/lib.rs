@@ -5,6 +5,7 @@
 
 pub mod download;
 pub mod launch;
+pub mod launcher_profiles;
 pub mod paths;
 pub mod profile;
 pub mod rules;

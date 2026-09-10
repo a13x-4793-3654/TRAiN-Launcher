@@ -219,13 +219,39 @@ fn get_auth_status() -> Result<AuthStatus, String> {
     })
 }
 
-/// 保存済みプロファイル一覧を取得する(スタブ)。
-///
-/// TODO: `train_launcher_core::profile` の実装完了後、実際のプロファイル一覧を返す。
+/// 保存済みプロファイル一覧を取得する。
 #[tauri::command]
-fn list_profiles() -> Result<Vec<String>, String> {
-    train_launcher_core::profile::list_profiles()
-        .map(|profiles| profiles.into_iter().map(|p| p.name).collect())
+fn list_profiles() -> Result<Vec<train_launcher_core::profile::Profile>, String> {
+    train_launcher_core::profile::list_profiles().map_err(|err| err.to_string())
+}
+
+/// 新規プロファイルを作成する。同じIDが既に存在する場合はエラーを返す。
+#[tauri::command]
+fn create_profile(profile: train_launcher_core::profile::Profile) -> Result<(), String> {
+    train_launcher_core::profile::create_profile(profile).map_err(|err| err.to_string())
+}
+
+/// 既存プロファイルを更新する。存在しないIDの場合はエラーを返す。
+#[tauri::command]
+fn update_profile(profile: train_launcher_core::profile::Profile) -> Result<(), String> {
+    train_launcher_core::profile::update_profile(profile).map_err(|err| err.to_string())
+}
+
+/// プロファイルを削除する。存在しないIDの場合はエラーを返す。
+#[tauri::command]
+fn delete_profile(id: String) -> Result<(), String> {
+    train_launcher_core::profile::delete_profile(&id).map_err(|err| err.to_string())
+}
+
+/// Mojangのバージョンマニフェストから、選択可能なMinecraftバージョン一覧を取得する。
+///
+/// プロファイル作成/編集画面でのバージョン選択(Combobox)用。
+#[tauri::command]
+async fn list_minecraft_versions(
+) -> Result<Vec<train_launcher_core::version_manifest::VersionEntry>, String> {
+    train_launcher_core::version_manifest::fetch_version_manifest()
+        .await
+        .map(|manifest| manifest.versions)
         .map_err(|err| err.to_string())
 }
 
@@ -302,7 +328,7 @@ impl From<train_launcher_core::download::DownloadProgress> for LaunchProgressPay
     }
 }
 
-/// 指定バージョンのMinecraftをダウンロード(未取得分のみ)した上で起動する。
+/// 指定プロファイルのMinecraftをダウンロード(未取得分のみ)した上で起動する。
 ///
 /// Minecraft自体の起動にはMicrosoftアカウントでのサインインが必須(Discordサインインのみ
 /// では起動できない)。ダウンロードは初回のみ発生し、2回目以降はSHA1が一致するファイルは
@@ -313,7 +339,7 @@ impl From<train_launcher_core::download::DownloadProgress> for LaunchProgressPay
 /// ゲームデータは公式Minecraft Launcherと共有するディレクトリ
 /// (`train_launcher_core::paths::default_minecraft_root`、`.minecraft` 相当)に保存する。
 #[tauri::command]
-async fn launch_minecraft(app_handle: AppHandle, version_id: String) -> Result<(), String> {
+async fn launch_minecraft(app_handle: AppHandle, profile_id: String) -> Result<(), String> {
     let token = store::load_token(Provider::Microsoft)
         .map_err(|err| err.to_string())?
         .ok_or_else(|| "Microsoftアカウントでサインインしてください".to_string())?;
@@ -325,6 +351,9 @@ async fn launch_minecraft(app_handle: AppHandle, version_id: String) -> Result<(
         .display_name
         .clone()
         .unwrap_or_else(|| "Player".to_string());
+
+    let profile =
+        train_launcher_core::profile::get_profile(&profile_id).map_err(|err| err.to_string())?;
 
     // 公式Minecraft Launcherと同じ `.minecraft` 相当のディレクトリを共有する
     // (二重ダウンロードを避け、どちらのランチャーからでも同じファイルを再利用できるようにする)。
@@ -339,9 +368,13 @@ async fn launch_minecraft(app_handle: AppHandle, version_id: String) -> Result<(
             }
         });
 
-    train_launcher_core::download::download_version_files(&version_id, &launcher_root, on_progress)
-        .await
-        .map_err(|err| err.to_string())?;
+    train_launcher_core::download::download_version_files(
+        &profile.minecraft_version,
+        &launcher_root,
+        on_progress,
+    )
+    .await
+    .map_err(|err| err.to_string())?;
 
     let _ = app_handle.emit(
         LAUNCH_PROGRESS_EVENT,
@@ -353,15 +386,6 @@ async fn launch_minecraft(app_handle: AppHandle, version_id: String) -> Result<(
         },
     );
 
-    let profile = train_launcher_core::profile::Profile {
-        id: version_id.clone(),
-        name: version_id.clone(),
-        minecraft_version: version_id,
-        mod_loader: None,
-        server_id: None,
-        java_path: None,
-        max_memory_mb: None,
-    };
     let auth = train_launcher_core::launch::LaunchAuth {
         username,
         uuid,
@@ -406,6 +430,10 @@ pub fn run() {
             sign_out_microsoft,
             get_auth_status,
             list_profiles,
+            create_profile,
+            update_profile,
+            delete_profile,
+            list_minecraft_versions,
             list_member_servers,
             resolve_mod_url,
             launch_minecraft,

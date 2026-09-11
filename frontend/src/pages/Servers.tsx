@@ -153,20 +153,36 @@ export function ServersPage() {
     setLaunchingId(server.id);
     setProgress(null);
     beginLaunch();
-    invoke("join_train_server", {
+    invoke<string[]>("join_train_server", {
       serverId: server.id,
       serverName: server.name,
     })
-      .then(() => {
-        dispatchToast(
-          <Toast>
-            <ToastTitle>起動しました</ToastTitle>
-            <ToastBody>
-              {server.name} 用の設定を適用し、Minecraftを起動しました
-            </ToastBody>
-          </Toast>,
-          { intent: "success" },
-        );
+      .then((downloadWarnings) => {
+        if (downloadWarnings.length > 0) {
+          dispatchToast(
+            <Toast>
+              <ToastTitle>
+                起動しました(一部のMod/リソースパックを導入できませんでした)
+              </ToastTitle>
+              <ToastBody>
+                {downloadWarnings.map((warning) => (
+                  <div key={warning}>{warning}</div>
+                ))}
+              </ToastBody>
+            </Toast>,
+            { intent: "warning" },
+          );
+        } else {
+          dispatchToast(
+            <Toast>
+              <ToastTitle>起動しました</ToastTitle>
+              <ToastBody>
+                {server.name} 用の設定を適用し、Minecraftを起動しました
+              </ToastBody>
+            </Toast>,
+            { intent: "success" },
+          );
+        }
       })
       .catch((err) =>
         dispatchToast(

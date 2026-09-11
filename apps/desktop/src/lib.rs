@@ -845,12 +845,16 @@ async fn launch_minecraft(app_handle: AppHandle, profile_id: String) -> Result<(
 /// 指定されたMod・リソースパックを依存関係含めて解決・インストールし、最後に起動する。
 /// 同じサーバーに再度参加した場合は、既存の同名プロファイルを更新する(サーバー側の
 /// バージョン/Mod構成の変更を追従させるため)。
+///
+/// 個々のMod・リソースパックのダウンロードが失敗しても(TRAiN側のmanifestが古いファイルを
+/// 参照している等)、全体を中断せず該当ファイルのみスキップして続行する。失敗したファイル名
+/// と理由の一覧を戻り値で返し、呼び出し側(フロントエンド)で警告として表示できるようにする。
 #[tauri::command]
 async fn join_train_server(
     app_handle: AppHandle,
     server_id: String,
     server_name: String,
-) -> Result<(), String> {
+) -> Result<Vec<String>, String> {
     use train_launcher_core::profile::{Profile, ProfileSource};
     use train_launcher_mods::resolver::{download_resolved_file, resolved_file_from_direct_url};
 
@@ -915,23 +919,32 @@ async fn join_train_server(
     // URLではない)。resolve_dependencies()/resource_pack::install_from_url()へ渡すと
     // プロジェクトID・スラッグとして誤認識され404になるため、解決を経由せず直接ダウンロード
     // する(詳細はTRAiNリポジトリの docs/LAUNCHER-API.md 参照)。
+    // 1件のダウンロード失敗(サーバー側manifestが古いファイルを参照している等)で全体を
+    // 中断すると、他のMod/リソースパックが正常でも一切起動できなくなってしまう。ここでは
+    // 失敗したファイルのみスキップして続行し、失敗一覧を戻り値として呼び出し側へ返す。
+    let mut download_warnings: Vec<String> = Vec::new();
+
     if !server_config.mod_urls.is_empty() {
         let dest_dir = profile_game_dir.join("mods");
         let total = server_config.mod_urls.len();
         for (index, url) in server_config.mod_urls.iter().enumerate() {
+            let resolved = resolved_file_from_direct_url(url);
             let _ = app_handle.emit(
                 LAUNCH_PROGRESS_EVENT,
                 LaunchProgressPayload {
                     phase: "installing_mods",
-                    phase_label: format!("Modを導入中({}/{total})", index + 1),
+                    phase_label: format!(
+                        "Modを導入中({}/{total}): {}",
+                        index + 1,
+                        resolved.filename
+                    ),
                     completed: index,
                     total,
                 },
             );
-            let resolved = resolved_file_from_direct_url(url);
-            download_resolved_file(&resolved, &dest_dir)
-                .await
-                .map_err(|err| err.to_string())?;
+            if let Err(err) = download_resolved_file(&resolved, &dest_dir).await {
+                download_warnings.push(format!("Mod「{}」: {err}", resolved.filename));
+            }
         }
     }
 
@@ -939,23 +952,28 @@ async fn join_train_server(
         let dest_dir = profile_game_dir.join("resourcepacks");
         let total = server_config.resource_pack_urls.len();
         for (index, url) in server_config.resource_pack_urls.iter().enumerate() {
+            let resolved = resolved_file_from_direct_url(url);
             let _ = app_handle.emit(
                 LAUNCH_PROGRESS_EVENT,
                 LaunchProgressPayload {
                     phase: "installing_resource_packs",
-                    phase_label: format!("リソースパックを導入中({}/{total})", index + 1),
+                    phase_label: format!(
+                        "リソースパックを導入中({}/{total}): {}",
+                        index + 1,
+                        resolved.filename
+                    ),
                     completed: index,
                     total,
                 },
             );
-            let resolved = resolved_file_from_direct_url(url);
-            download_resolved_file(&resolved, &dest_dir)
-                .await
-                .map_err(|err| err.to_string())?;
+            if let Err(err) = download_resolved_file(&resolved, &dest_dir).await {
+                download_warnings.push(format!("リソースパック「{}」: {err}", resolved.filename));
+            }
         }
     }
 
-    launch_profile(app_handle, profile).await
+    launch_profile(app_handle, profile).await?;
+    Ok(download_warnings)
 }
 
 /// TRAiNサーバー専用プロファイルの導入済みMod・リソースパックを削除する(「初期化」用)。

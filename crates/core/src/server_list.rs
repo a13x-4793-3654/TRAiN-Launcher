@@ -10,6 +10,11 @@
 //! - 同じアドレスの登録が既にあれば、名前だけ最新化する(重複追加しない)。
 //! - 接続先アドレスが変わった場合(このツールが前回登録したアドレスが分かっている場合)は、
 //!   古い登録を消さずに付け替える(重複して並ぶと、利用者がどちらを使えばよいか迷う)。
+//! - 1.19以降のMinecraft本体は、利用者が「サーバーへ直接接続」(Direct Connect)を使うと
+//!   マルチプレイ一覧には表示しない`hidden`バイトタグ付きの登録を自動生成することがある。
+//!   同じアドレスへ登録する際は、名前が変わっていなくてもこのタグを必ず解除する
+//!   (これを見逃すと、`servers.dat`上は正しく登録されているのに利用者の画面には
+//!   何も表示されない、という気付きにくい不具合になる)。
 
 use std::path::Path;
 
@@ -29,6 +34,9 @@ pub enum UpsertResult {
     Renamed,
     /// 接続先アドレスが変わったため、前回このツールが登録した内容を付け替えた。
     Moved,
+    /// 名前・アドレスは同じだが、`hidden`(マルチプレイ一覧に表示しないフラグ)が
+    /// 立っていたため解除した。
+    Unhidden,
 }
 
 /// 指定のサーバーを`servers.dat`へ登録(または更新)する。
@@ -40,6 +48,13 @@ pub enum UpsertResult {
 /// ファイルが存在しない、または壊れていて読み取れない場合は、壊れたファイルを
 /// `servers.dat.bak-<UNIXタイムスタンプ>`として同じディレクトリに退避したうえで、
 /// 空の一覧から作り直す(起動全体を止めないため)。
+///
+/// 1.19以降、Minecraft本体は「サーバーへ直接接続」(Direct Connect)を使った際に、
+/// マルチプレイ一覧には表示しない `hidden` バイトタグ付きのエントリを`servers.dat`へ
+/// 自動生成することがある。同じアドレスへこの関数で登録する際は、たとえ名前が
+/// 変わっていなくても、このタグを必ず`0`(表示)へ戻す。ここを見逃すと、ファイル上は
+/// 正しく登録されているのに利用者のマルチプレイ画面には何も表示されない、という
+/// 分かりにくい不具合になる。
 pub fn upsert(
     game_dir: &Path,
     name: &str,
@@ -69,7 +84,8 @@ pub fn upsert(
         _ => Vec::new(),
     };
 
-    // 既に同じアドレスの登録があれば、名前だけ最新化する(重複追加しない)。
+    // 既に同じアドレスの登録があれば、名前を最新化し、"hidden"を必ず解除する
+    // (重複追加はしない)。
     for item in servers.iter_mut() {
         let Tag::Compound(entries) = item else {
             continue;
@@ -81,15 +97,22 @@ pub fn upsert(
         if !ip.eq_ignore_ascii_case(address) {
             continue;
         }
-        if entry.get_string("name") == Some(name) {
+        let name_matches = entry.get_string("name") == Some(name);
+        let is_hidden = matches!(entry.get("hidden"), Some(Tag::Byte(value)) if *value != 0);
+        if name_matches && !is_hidden {
             return Ok(UpsertResult::Unchanged);
         }
         let mut updated = entry;
         updated.set("name", Tag::String(name.to_string()));
+        updated.set("hidden", Tag::Byte(0));
         *item = updated.into_tag();
         root.set("servers", Tag::List(TagType::Compound, servers));
         write(&path, &root)?;
-        return Ok(UpsertResult::Renamed);
+        return Ok(if name_matches {
+            UpsertResult::Unhidden
+        } else {
+            UpsertResult::Renamed
+        });
     }
 
     // 接続先が変わった場合は、前に置いた登録を付け替える。
@@ -110,6 +133,7 @@ pub fn upsert(
                 let mut updated = entry;
                 updated.set("ip", Tag::String(address.to_string()));
                 updated.set("name", Tag::String(name.to_string()));
+                updated.set("hidden", Tag::Byte(0));
                 *item = updated.into_tag();
                 root.set("servers", Tag::List(TagType::Compound, servers));
                 write(&path, &root)?;
@@ -121,6 +145,7 @@ pub fn upsert(
     let mut added = Compound::new();
     added.set("name", Tag::String(name.to_string()));
     added.set("ip", Tag::String(address.to_string()));
+    added.set("hidden", Tag::Byte(0));
     servers.push(added.into_tag());
     root.set("servers", Tag::List(TagType::Compound, servers));
     write(&path, &root)?;
@@ -182,6 +207,63 @@ mod tests {
     }
 
     #[test]
+    fn new_entry_is_not_hidden() {
+        let dir = tempdir().unwrap();
+        upsert(dir.path(), "碓氷鯖", "mc.example.com:25565", None).unwrap();
+
+        let bytes = std::fs::read(dir.path().join("servers.dat")).unwrap();
+        let root = nbt::read(&mut bytes.as_slice()).unwrap();
+        let Some(Tag::List(_, items)) = root.get("servers") else {
+            panic!("servers missing");
+        };
+        let Tag::Compound(entries) = &items[0] else {
+            panic!("not compound");
+        };
+        assert_eq!(
+            Compound(entries.clone()).get("hidden"),
+            Some(&Tag::Byte(0))
+        );
+    }
+
+    /// Minecraft本体が「サーバーへ直接接続」(Direct Connect)時に自動生成することがある
+    /// `hidden: 1` 付きの登録を、同じ名前・アドレスで再登録した際に解除できることを確認する。
+    /// これを見逃すと、`servers.dat`上は正しく登録されているのにマルチプレイ一覧には
+    /// 何も表示されない、という不具合になる(実際にVPS環境で発生したケース)。
+    #[test]
+    fn unhides_entry_that_was_marked_hidden_even_when_name_unchanged() {
+        let dir = tempdir().unwrap();
+        let mut root = Compound::new();
+        let mut entry = Compound::new();
+        entry.set("name", Tag::String("碓氷鯖".to_string()));
+        entry.set("ip", Tag::String("mc.example.com:25565".to_string()));
+        entry.set("hidden", Tag::Byte(1));
+        root.set(
+            "servers",
+            Tag::List(TagType::Compound, vec![entry.into_tag()]),
+        );
+        let mut buffer = Vec::new();
+        nbt::write(&mut buffer, &root).unwrap();
+        std::fs::write(dir.path().join("servers.dat"), buffer).unwrap();
+
+        let result = upsert(dir.path(), "碓氷鯖", "mc.example.com:25565", None).unwrap();
+        assert_eq!(result, UpsertResult::Unhidden);
+
+        let bytes = std::fs::read(dir.path().join("servers.dat")).unwrap();
+        let root = nbt::read(&mut bytes.as_slice()).unwrap();
+        let Some(Tag::List(_, items)) = root.get("servers") else {
+            panic!("servers missing");
+        };
+        assert_eq!(items.len(), 1);
+        let Tag::Compound(entries) = &items[0] else {
+            panic!("not compound");
+        };
+        assert_eq!(
+            Compound(entries.clone()).get("hidden"),
+            Some(&Tag::Byte(0))
+        );
+    }
+
+    #[test]
     fn renames_when_address_matches_but_name_changed() {
         let dir = tempdir().unwrap();
         upsert(dir.path(), "旧名前", "mc.example.com:25565", None).unwrap();
@@ -226,6 +308,10 @@ mod tests {
         assert_eq!(
             Compound(entries.clone()).get_string("ip"),
             Some("new.example.com:25565")
+        );
+        assert_eq!(
+            Compound(entries.clone()).get("hidden"),
+            Some(&Tag::Byte(0))
         );
     }
 

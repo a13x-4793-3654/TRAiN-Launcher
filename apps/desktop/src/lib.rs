@@ -371,6 +371,34 @@ async fn link_train_account(server_id: String) -> Result<(), String> {
         .map_err(|err| err.to_string())
 }
 
+/// 全ランチャー共通のグローバルお知らせを新しい順に取得する(ホーム画面用)。
+/// 認証不要(未サインインでも呼べる)。
+#[tauri::command]
+async fn get_global_announcements(
+) -> Result<Vec<train_launcher_server_api::Announcement>, String> {
+    let client = train_launcher_server_api::create_client(None);
+    client
+        .get_global_announcements()
+        .await
+        .map_err(|err| err.to_string())
+}
+
+/// 指定サーバーのお知らせを新しい順に取得する(サーバー詳細画面用)。
+/// 認証・非開示ポリシーは `get_server_config` と同じ(所属メンバーのみ閲覧可能)。
+#[tauri::command]
+async fn get_server_announcements(
+    server_id: String,
+) -> Result<Vec<train_launcher_server_api::Announcement>, String> {
+    let discord_access_token = store::load_token(Provider::Discord)
+        .map_err(|err| err.to_string())?
+        .map(|record| record.access_token);
+    let client = train_launcher_server_api::create_client(discord_access_token);
+    client
+        .get_server_announcements(&server_id)
+        .await
+        .map_err(|err| err.to_string())
+}
+
 
 /// フロントエンドへ返す、解決済みMod/リソースパックファイルの情報。
 #[derive(Debug, Clone, Serialize)]
@@ -1394,6 +1422,8 @@ pub fn run() {
             list_member_servers,
             get_server_config,
             link_train_account,
+            get_global_announcements,
+            get_server_announcements,
             resolve_mod_url,
             resolve_mod_urls,
             install_mod,

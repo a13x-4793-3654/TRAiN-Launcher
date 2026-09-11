@@ -48,3 +48,15 @@ pub struct LinkAccountRequest {
     pub mc_uuid: String,
     pub mc_name: String,
 }
+
+/// お知らせ1件(グローバル/サーバー個別で共通の形式)。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Announcement {
+    pub id: String,
+    pub title: String,
+    pub body: String,
+    /// `"info"` | `"warning"` | `"critical"`。
+    pub severity: String,
+    /// ISO8601 (UTC)。
+    pub published_at: String,
+}

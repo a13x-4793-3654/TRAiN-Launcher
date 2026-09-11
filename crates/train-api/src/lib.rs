@@ -15,13 +15,19 @@
 //! 詳細は [`LinkAccountRequest`] / [`TrainApiClient::link_account`] を参照。
 //! TRAiN側で実装済み(`GET .../config` の `linked` フィールドと合わせて提供)。
 //! 成功時のレスポンス本文(`{ "linked": true }`)は使用しない(ステータスコードのみで判定)。
+//!
+//! 追加エンドポイント: `GET {base}/api/announcements`(グローバルお知らせ、認証不要)/
+//! `GET {base}/api/servers/{server_id}/announcements`(サーバー個別お知らせ、`.../config`
+//! と同じ認証・非開示ポリシー)。詳細は [`Announcement`] /
+//! [`TrainApiClient::get_global_announcements`] / [`TrainApiClient::get_server_announcements`]
+//! を参照。
 
 pub mod models;
 
 use async_trait::async_trait;
 use serde::Deserialize;
 
-pub use models::{LinkAccountRequest, MemberServer, ServerConfig};
+pub use models::{Announcement, LinkAccountRequest, MemberServer, ServerConfig};
 
 /// train-launcher-server-api 全体で使用するエラー型。
 ///
@@ -131,6 +137,17 @@ pub trait TrainApiClient: Send + Sync {
         server_id: &str,
         request: &LinkAccountRequest,
     ) -> Result<(), TrainApiError>;
+
+    /// 現在有効なグローバル(ランチャー全体共通)のお知らせを新しい順に取得する。
+    /// 認証不要(未サインインでも呼べる)。
+    async fn get_global_announcements(&self) -> Result<Vec<Announcement>, TrainApiError>;
+
+    /// 指定サーバーのお知らせを新しい順に取得する。認証・非開示ポリシーは
+    /// [`TrainApiClient::get_server_config`] と同じ(所属メンバーのみ閲覧可能)。
+    async fn get_server_announcements(
+        &self,
+        server_id: &str,
+    ) -> Result<Vec<Announcement>, TrainApiError>;
 }
 
 /// 開発・テスト用のモック実装。常にダミーデータを返す。
@@ -171,6 +188,31 @@ impl TrainApiClient for MockTrainApiClient {
     ) -> Result<(), TrainApiError> {
         // モック環境では常に成功させる(UI側の同意〜完了までの流れを確認できるようにする)。
         Ok(())
+    }
+
+    async fn get_global_announcements(&self) -> Result<Vec<Announcement>, TrainApiError> {
+        Ok(vec![Announcement {
+            id: "mock-announcement-global-1".to_string(),
+            title: "ランチャーへようこそ".to_string(),
+            body: "TRAiN Launcherのモック環境です。実際のお知らせはTRAiN API接続後に表示されます。"
+                .to_string(),
+            severity: "info".to_string(),
+            published_at: "2026-01-01T00:00:00.000Z".to_string(),
+        }])
+    }
+
+    async fn get_server_announcements(
+        &self,
+        _server_id: &str,
+    ) -> Result<Vec<Announcement>, TrainApiError> {
+        Ok(vec![Announcement {
+            id: "mock-announcement-server-1".to_string(),
+            title: "メンテナンス予定".to_string(),
+            body: "このサーバーは近日中にメンテナンスを予定しています(モックデータ)。"
+                .to_string(),
+            severity: "warning".to_string(),
+            published_at: "2026-01-02T00:00:00.000Z".to_string(),
+        }])
     }
 }
 
@@ -263,6 +305,28 @@ impl TrainApiClient for HttpTrainApiClient {
             return Err(map_error_response(response).await);
         }
         Ok(())
+    }
+
+    async fn get_global_announcements(&self) -> Result<Vec<Announcement>, TrainApiError> {
+        let response = self.get("/api/announcements").send().await?;
+        if !response.status().is_success() {
+            return Err(map_error_response(response).await);
+        }
+        Ok(response.json::<Vec<Announcement>>().await?)
+    }
+
+    async fn get_server_announcements(
+        &self,
+        server_id: &str,
+    ) -> Result<Vec<Announcement>, TrainApiError> {
+        let response = self
+            .get(&format!("/api/servers/{server_id}/announcements"))
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            return Err(map_error_response(response).await);
+        }
+        Ok(response.json::<Vec<Announcement>>().await?)
     }
 }
 

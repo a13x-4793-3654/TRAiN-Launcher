@@ -17,6 +17,9 @@ import {
   DialogTitle,
   DialogContent,
   DialogActions,
+  Card,
+  CardHeader,
+  Badge,
   makeStyles,
   tokens,
 } from "@fluentui/react-components";
@@ -51,6 +54,37 @@ interface LaunchProgressPayload {
   total: number;
 }
 
+interface Announcement {
+  id: string;
+  title: string;
+  body: string;
+  severity: "info" | "warning" | "critical";
+  published_at: string;
+}
+
+const dateTimeFormatter = new Intl.DateTimeFormat("ja-JP", {
+  dateStyle: "medium",
+  timeStyle: "short",
+});
+
+/** ISO8601文字列を "2026年9月11日 2:34" のような表示用文字列に変換する。解釈できない場合はそのまま返す。 */
+function formatPublishedAt(iso: string): string {
+  const date = new Date(iso);
+  return Number.isNaN(date.getTime()) ? iso : dateTimeFormatter.format(date);
+}
+
+// お知らせのseverityに応じたBadgeの色・ラベル。未知の値が来た場合は"informative"扱い。
+const SEVERITY_BADGE_COLOR: Record<string, "informative" | "warning" | "danger"> = {
+  info: "informative",
+  warning: "warning",
+  critical: "danger",
+};
+const SEVERITY_LABEL: Record<string, string> = {
+  info: "情報",
+  warning: "注意",
+  critical: "重要",
+};
+
 const useStyles = makeStyles({
   backRow: {
     marginBottom: tokens.spacingVerticalM,
@@ -71,6 +105,12 @@ const useStyles = makeStyles({
     flexDirection: "column",
     gap: tokens.spacingVerticalXXS,
     marginTop: tokens.spacingVerticalS,
+  },
+  announcementList: {
+    display: "flex",
+    flexDirection: "column",
+    gap: tokens.spacingVerticalS,
+    marginTop: tokens.spacingVerticalM,
   },
   progressArea: {
     display: "flex",
@@ -107,6 +147,9 @@ export function ServerDetailPage(props: {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  const [announcements, setAnnouncements] = useState<Announcement[]>([]);
+  const [announcementsLoading, setAnnouncementsLoading] = useState(true);
+
   const [resetDialogOpen, setResetDialogOpen] = useState(false);
   const [resetting, setResetting] = useState(false);
   const [resetMessage, setResetMessage] = useState<
@@ -126,6 +169,17 @@ export function ServerDetailPage(props: {
     setConfig(null);
     loadConfig();
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.server.id]);
+
+  useEffect(() => {
+    setAnnouncements([]);
+    setAnnouncementsLoading(true);
+    invoke<Announcement[]>("get_server_announcements", {
+      serverId: props.server.id,
+    })
+      .then(setAnnouncements)
+      .catch((err) => console.error("failed to load server announcements", err))
+      .finally(() => setAnnouncementsLoading(false));
   }, [props.server.id]);
 
   const handleReset = () => {
@@ -207,6 +261,47 @@ export function ServerDetailPage(props: {
           <MessageBarBody>{resetMessage.text}</MessageBarBody>
         </MessageBar>
       )}
+
+      {announcementsLoading ? (
+        <div className={styles.section}>
+          <Spinner size="small" label="お知らせを取得中..." />
+        </div>
+      ) : announcements.length > 0 ? (
+        <div className={styles.section}>
+          <Title3 as="h3" block>
+            お知らせ
+          </Title3>
+          <div className={styles.announcementList}>
+            {announcements.map((announcement) => (
+              <Card key={announcement.id}>
+                <CardHeader
+                  header={<Text weight="semibold">{announcement.title}</Text>}
+                  description={
+                    <Caption1>
+                      {formatPublishedAt(announcement.published_at)}
+                    </Caption1>
+                  }
+                  action={
+                    <Badge
+                      appearance="tint"
+                      color={
+                        SEVERITY_BADGE_COLOR[announcement.severity] ??
+                        "informative"
+                      }
+                    >
+                      {SEVERITY_LABEL[announcement.severity] ??
+                        announcement.severity}
+                    </Badge>
+                  }
+                />
+                <Body1 as="p" block>
+                  {announcement.body}
+                </Body1>
+              </Card>
+            ))}
+          </div>
+        </div>
+      ) : null}
 
       {loading ? (
         <Spinner size="small" label="サーバー設定を取得中..." />

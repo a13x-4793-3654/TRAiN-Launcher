@@ -106,6 +106,8 @@ TRAiN側のAPI仕様は確定済みです(TRAiNリポジトリの `docs/LAUNCHER
 | --- | --- | --- |
 | `TRAIN_LAUNCHER_API_BASE_URL` | 任意(未設定時はモック実装を使用) | TRAiN APIのベースURL(例: `https://train.example.com`)。設定すると、`GET {base}/api/members/{discord_user_id}/servers` / `GET {base}/api/servers/{server_id}/config` へリクエストする実HTTPクライアント(`HttpTrainApiClient`)を使用します。認証はDiscordアクセストークンをBearerとして送るだけでよく(TRAiN側がDiscord APIへ問い合わせて本人確認する)、追加設定は不要です |
 
+お知らせ機能(`GET {base}/api/announcements` / `GET {base}/api/servers/{server_id}/announcements`)も同じ `TRAIN_LAUNCHER_API_BASE_URL` を使うため、新しい環境変数は不要です。未設定時は `MockTrainApiClient` がダミーのお知らせを返します。
+
 例(PowerShellで `cargo tauri dev` の前に設定):
 ```powershell
 $env:TRAIN_LAUNCHER_API_BASE_URL = "https://api.train.example.com"

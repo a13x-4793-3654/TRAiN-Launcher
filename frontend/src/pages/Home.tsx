@@ -43,6 +43,14 @@ interface Profile {
   last_launched_at: string | null;
 }
 
+interface Announcement {
+  id: string;
+  title: string;
+  body: string;
+  severity: "info" | "warning" | "critical";
+  published_at: string;
+}
+
 interface GameExitedPayload {
   exit_code: number | null;
 }
@@ -112,6 +120,18 @@ function formatLastLaunched(iso: string): string {
   return Number.isNaN(date.getTime()) ? iso : dateTimeFormatter.format(date);
 }
 
+// お知らせのseverityに応じたBadgeの色・ラベル。未知の値が来た場合は"informative"扱い。
+const SEVERITY_BADGE_COLOR: Record<string, "informative" | "warning" | "danger"> = {
+  info: "informative",
+  warning: "warning",
+  critical: "danger",
+};
+const SEVERITY_LABEL: Record<string, string> = {
+  info: "情報",
+  warning: "注意",
+  critical: "重要",
+};
+
 /**
  * ホーム画面。
  *
@@ -133,6 +153,9 @@ export function HomePage({ onNavigate }: { onNavigate: (key: NavKey) => void }) 
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [profilesLoading, setProfilesLoading] = useState(true);
 
+  const [announcements, setAnnouncements] = useState<Announcement[]>([]);
+  const [announcementsLoading, setAnnouncementsLoading] = useState(true);
+
   const [launchingId, setLaunchingId] = useState<string | null>(null);
   const [progress, setProgress] = useState<LaunchProgressPayload | null>(
     null,
@@ -152,6 +175,14 @@ export function HomePage({ onNavigate }: { onNavigate: (key: NavKey) => void }) 
       .then(setProfiles)
       .catch((err) => console.error("failed to load profiles", err))
       .finally(() => setProfilesLoading(false));
+  }, []);
+
+  useEffect(() => {
+    setAnnouncementsLoading(true);
+    invoke<Announcement[]>("get_global_announcements")
+      .then(setAnnouncements)
+      .catch((err) => console.error("failed to load announcements", err))
+      .finally(() => setAnnouncementsLoading(false));
   }, []);
 
   useEffect(() => {
@@ -349,9 +380,43 @@ export function HomePage({ onNavigate }: { onNavigate: (key: NavKey) => void }) 
         <Title3 as="h3" block>
           お知らせ
         </Title3>
-        <Body1 as="p" block>
-          現在お知らせはありません。
-        </Body1>
+        {announcementsLoading ? (
+          <Spinner size="small" label="読み込み中..." />
+        ) : announcements.length === 0 ? (
+          <Body1 as="p" block>
+            現在お知らせはありません。
+          </Body1>
+        ) : (
+          <div className={styles.list}>
+            {announcements.map((announcement) => (
+              <Card key={announcement.id}>
+                <CardHeader
+                  header={<Text weight="semibold">{announcement.title}</Text>}
+                  description={
+                    <Caption1>
+                      {formatLastLaunched(announcement.published_at)}
+                    </Caption1>
+                  }
+                  action={
+                    <Badge
+                      appearance="tint"
+                      color={
+                        SEVERITY_BADGE_COLOR[announcement.severity] ??
+                        "informative"
+                      }
+                    >
+                      {SEVERITY_LABEL[announcement.severity] ??
+                        announcement.severity}
+                    </Badge>
+                  }
+                />
+                <Body1 as="p" block>
+                  {announcement.body}
+                </Body1>
+              </Card>
+            ))}
+          </div>
+        )}
       </div>
 
       <Toaster toasterId={TOASTER_ID} />

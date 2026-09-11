@@ -12,8 +12,9 @@
 //!
 //! 追加エンドポイント: `POST {base}/api/servers/{server_id}/link`(初回参加時、ランチャーが
 //! 既に確認済みのDiscord/Minecraftアカウント情報を使って紐づけを直接完了させる。
-//! 詳細は [`LinkAccountRequest`] / [`TrainApiClient::link_account`] を参照。TRAiN側に
-//! 未実装の場合は追加を依頼中。
+//! 詳細は [`LinkAccountRequest`] / [`TrainApiClient::link_account`] を参照。
+//! TRAiN側で実装済み(`GET .../config` の `linked` フィールドと合わせて提供)。
+//! 成功時のレスポンス本文(`{ "linked": true }`)は使用しない(ステータスコードのみで判定)。
 
 pub mod models;
 

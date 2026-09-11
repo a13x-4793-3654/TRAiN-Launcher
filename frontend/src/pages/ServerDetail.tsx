@@ -40,6 +40,7 @@ interface ServerConfig {
   mod_loader: string | null;
   mod_urls: string[];
   resource_pack_urls: string[];
+  linked: boolean | null;
 }
 
 interface LaunchProgressPayload {
@@ -226,6 +227,15 @@ export function ServerDetailPage(props: {
             </Field>
             <Field label="Modローダー">
               <Text>{config.mod_loader ?? "なし(バニラ)"}</Text>
+            </Field>
+            <Field label="Discordアカウントとの連携">
+              <Text>
+                {config.linked === false
+                  ? "未連携(初回参加時に連携の案内が表示されます)"
+                  : config.linked === true
+                    ? "連携済み"
+                    : "不明"}
+              </Text>
             </Field>
           </div>
 

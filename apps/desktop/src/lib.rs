@@ -336,6 +336,41 @@ async fn get_server_config(
         .map_err(|err| err.to_string())
 }
 
+/// ランチャーが既に確認済みのアカウント情報を使い、Discord↔Minecraftアカウントの紐づけを
+/// 直接完了させる(初回参加時の注意事項モーダルで同意した後に呼び出される)。
+///
+/// 通常はMinecraft参加時にゲーム内へ表示される認証コードをDiscordの `/link` コマンドへ
+/// 入力する手順だが、ランチャーは既に (1) Discordサインインで確認済みのDiscordアカウント、
+/// (2) Microsoft/Xbox認証済みのMinecraftアカウント(UUID・プレイヤー名)の両方を保持して
+/// いるため、それらをそのままTRAiN側へ渡して紐づけを完結させる。
+#[tauri::command]
+async fn link_train_account(server_id: String) -> Result<(), String> {
+    let discord_access_token = store::load_token(Provider::Discord)
+        .map_err(|err| err.to_string())?
+        .ok_or_else(|| "Discordアカウントでサインインしてください".to_string())?
+        .access_token;
+
+    let microsoft_token = store::load_token(Provider::Microsoft)
+        .map_err(|err| err.to_string())?
+        .ok_or_else(|| "Microsoftアカウントでサインインしてください".to_string())?;
+    let mc_uuid = microsoft_token.uuid.ok_or_else(|| {
+        "MinecraftのUUIDが取得できていません。サインアウトして再度サインインしてください"
+            .to_string()
+    })?;
+    let mc_name = microsoft_token
+        .display_name
+        .ok_or_else(|| "Minecraftのプレイヤー名が取得できていません".to_string())?;
+
+    let client = train_launcher_server_api::create_client(Some(discord_access_token));
+    client
+        .link_account(
+            &server_id,
+            &train_launcher_server_api::LinkAccountRequest { mc_uuid, mc_name },
+        )
+        .await
+        .map_err(|err| err.to_string())
+}
+
 
 /// フロントエンドへ返す、解決済みMod/リソースパックファイルの情報。
 #[derive(Debug, Clone, Serialize)]
@@ -1030,6 +1065,7 @@ pub fn run() {
             list_mod_loader_versions,
             list_member_servers,
             get_server_config,
+            link_train_account,
             resolve_mod_url,
             resolve_mod_urls,
             install_mod,

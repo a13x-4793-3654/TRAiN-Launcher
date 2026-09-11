@@ -9,13 +9,18 @@
 //! トークン>`)。[`create_client`] は環境変数 [`API_BASE_URL_ENV_VAR`]
 //! (`TRAIN_LAUNCHER_API_BASE_URL`) が未設定の場合、[`MockTrainApiClient`] を返す
 //! (実サーバーが用意できない開発・デモ環境向けのフォールバック)。
+//!
+//! 追加エンドポイント: `POST {base}/api/servers/{server_id}/link`(初回参加時、ランチャーが
+//! 既に確認済みのDiscord/Minecraftアカウント情報を使って紐づけを直接完了させる。
+//! 詳細は [`LinkAccountRequest`] / [`TrainApiClient::link_account`] を参照。TRAiN側に
+//! 未実装の場合は追加を依頼中。
 
 pub mod models;
 
 use async_trait::async_trait;
 use serde::Deserialize;
 
-pub use models::{MemberServer, ServerConfig};
+pub use models::{LinkAccountRequest, MemberServer, ServerConfig};
 
 /// train-launcher-server-api 全体で使用するエラー型。
 ///
@@ -49,6 +54,20 @@ pub enum TrainApiError {
     /// `405 method_not_allowed`: 想定外のHTTPメソッド(通常は発生しない)。
     #[error("このAPIリクエストは許可されていません")]
     MethodNotAllowed,
+    /// 409 `already_linked`(`link_account`のみ): このDiscordアカウントは、このサーバーの
+    /// Discordサーバー(ギルド)内で既に別のMinecraftアカウントと紐づけ済み。
+    #[error(
+        "このDiscordアカウントは既に別のMinecraftアカウントと紐づけられています。心当たりが\
+         ない場合はサーバー管理者に確認してください"
+    )]
+    AlreadyLinked,
+    /// 409 `uuid_already_linked`(`link_account`のみ): このMinecraftアカウント(UUID)は、
+    /// このサーバーのDiscordサーバー(ギルド)内で既に別のDiscordアカウントと紐づけ済み。
+    #[error(
+        "このMinecraftアカウントは既に別のDiscordアカウントと紐づけられています。心当たりが\
+         ない場合はサーバー管理者に確認してください"
+    )]
+    UuidAlreadyLinked,
     /// 上記に当てはまらない未知のエラーコード。TRAiN側の仕様変更などを検知できるよう、
     /// status/codeをそのまま表示する。
     #[error("APIエラーが発生しました(status: {status}, code: {code})")]
@@ -78,6 +97,8 @@ async fn map_error_response(response: reqwest::Response) -> TrainApiError {
         (404, "not_configured") => TrainApiError::NotConfigured,
         (404, _) => TrainApiError::NotFound,
         (405, _) => TrainApiError::MethodNotAllowed,
+        (409, "already_linked") => TrainApiError::AlreadyLinked,
+        (409, "uuid_already_linked") => TrainApiError::UuidAlreadyLinked,
         (400, _) => TrainApiError::InvalidRequest,
         _ => TrainApiError::Api {
             status,
@@ -97,6 +118,18 @@ pub trait TrainApiClient: Send + Sync {
 
     /// 指定サーバーの設定(接続先・Mod構成・リソースパックなど)を取得する。
     async fn get_server_config(&self, server_id: &str) -> Result<ServerConfig, TrainApiError>;
+
+    /// ランチャーが既に確認済みのMinecraftアカウント情報(Microsoft/Xbox認証済みの
+    /// UUID・プレイヤー名)を使い、Discordアカウントとの紐づけを直接完了させる。
+    ///
+    /// 通常の手順(Minecraft参加時にゲーム内へ表示される認証コードをDiscordの
+    /// `/link` コマンドへ入力する)を経由しない代替経路。呼び出し元は事前にユーザーへ
+    /// 紐づけの内容(何と何がどう結び付くか)を提示し、同意を得た上で呼び出すこと。
+    async fn link_account(
+        &self,
+        server_id: &str,
+        request: &LinkAccountRequest,
+    ) -> Result<(), TrainApiError>;
 }
 
 /// 開発・テスト用のモック実装。常にダミーデータを返す。
@@ -122,7 +155,19 @@ impl TrainApiClient for MockTrainApiClient {
             mod_loader: Some("fabric".to_string()),
             mod_urls: vec![],
             resource_pack_urls: vec![],
+            // モック環境では実サーバーが存在しないため紐づけ状態を判定できない。
+            // 初回参加時の注意事項モーダルをUI上で確認できるよう、常に未紐づけ扱いにする。
+            linked: Some(false),
         })
+    }
+
+    async fn link_account(
+        &self,
+        _server_id: &str,
+        _request: &LinkAccountRequest,
+    ) -> Result<(), TrainApiError> {
+        // モック環境では常に成功させる(UI側の同意〜完了までの流れを確認できるようにする)。
+        Ok(())
     }
 }
 
@@ -164,6 +209,14 @@ impl HttpTrainApiClient {
             None => request,
         }
     }
+
+    fn post(&self, path: &str) -> reqwest::RequestBuilder {
+        let request = self.client.post(format!("{}{path}", self.base_url));
+        match &self.discord_access_token {
+            Some(token) => request.bearer_auth(token),
+            None => request,
+        }
+    }
 }
 
 #[async_trait]
@@ -191,6 +244,22 @@ impl TrainApiClient for HttpTrainApiClient {
             return Err(map_error_response(response).await);
         }
         Ok(response.json::<ServerConfig>().await?)
+    }
+
+    async fn link_account(
+        &self,
+        server_id: &str,
+        request: &LinkAccountRequest,
+    ) -> Result<(), TrainApiError> {
+        let response = self
+            .post(&format!("/api/servers/{server_id}/link"))
+            .json(request)
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            return Err(map_error_response(response).await);
+        }
+        Ok(())
     }
 }
 

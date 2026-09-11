@@ -76,6 +76,17 @@ pub struct Profile {
     /// 未起動の場合は `None`。
     #[serde(default)]
     pub last_launched_at: Option<String>,
+    /// 直近で `servers.dat` に登録したサーバーアドレス([`crate::server_list::upsert`]参照)。
+    /// 次回起動時にアドレスが変わっていた場合、同一エントリを「移動」として扱うために使う
+    /// (利用者が並び替えた位置やアイコンは維持したまま、接続先だけ更新する)。
+    #[serde(default)]
+    pub last_server_address: Option<String>,
+    /// これまでにこの仕組みで自動有効化したことがあるリソースパックの識別子
+    /// (`options.txt` の `resourcePacks:` に書き込む形式そのままの `file/<ファイル名>`)。
+    /// [`crate::resource_pack_options::apply`]が、利用者が自分で無効化したパックを
+    /// 毎回勝手に戻さないための判定に使う。
+    #[serde(default)]
+    pub enabled_resource_packs: Vec<String>,
 }
 
 impl Profile {
@@ -156,6 +167,8 @@ fn official_to_profile(official: OfficialProfile) -> Profile {
         max_memory_mb,
         source: ProfileSource::Official,
         last_launched_at: None,
+        last_server_address: None,
+        enabled_resource_packs: Vec::new(),
     }
 }
 
@@ -288,6 +301,8 @@ mod tests {
             max_memory_mb: None,
             source: ProfileSource::Train,
             last_launched_at: None,
+            last_server_address: None,
+            enabled_resource_packs: Vec::new(),
         }
     }
 

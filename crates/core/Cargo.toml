@@ -21,3 +21,8 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 dirs = "5"
 # 公式Minecraft Launcherの launcher_profiles.json に書き込む作成/最終使用日時(ISO 8601)に使用。
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
+[dev-dependencies]
+# servers.dat/options.txt を書き換えるテストで、実ファイルシステム上に隔離した
+# 一時ディレクトリを作るために使用。
+tempfile = "3"

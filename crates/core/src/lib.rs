@@ -8,9 +8,12 @@ pub mod launch;
 pub mod launcher_profiles;
 pub mod maven;
 pub mod mod_loader;
+pub mod nbt;
 pub mod paths;
 pub mod profile;
+pub mod resource_pack_options;
 pub mod rules;
+pub mod server_list;
 pub mod settings;
 pub mod version_manifest;
 
@@ -54,5 +57,7 @@ mod error {
         ModLoaderVersionNotFound { loader: String, game_version: String },
         #[error("mod loader installation failed: {0}")]
         ModLoaderInstallFailed(String),
+        #[error("invalid NBT data: {0}")]
+        InvalidNbt(String),
     }
 }

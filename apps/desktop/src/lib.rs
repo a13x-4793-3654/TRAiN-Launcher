@@ -923,7 +923,12 @@ async fn join_train_server(
         .join(&server_id)
         .display()
         .to_string();
-    let profile = Profile {
+    // 既存プロファイルがあれば、servers.dat上の同一エントリを判別するために前回登録した
+    // アドレス・options.txt上で既に自動有効化済みのリソースパック一覧を引き継ぐ
+    // (新規プロファイル作成時はどちらも空)。
+    let previous_profile =
+        train_launcher_core::profile::get_profile(&format!("train-{server_id}")).ok();
+    let mut profile = Profile {
         id: format!("train-{server_id}"),
         name: server_name,
         minecraft_version: server_config.minecraft_version.clone(),
@@ -937,6 +942,12 @@ async fn join_train_server(
         max_memory_mb: None,
         source: ProfileSource::Train,
         last_launched_at: None,
+        last_server_address: previous_profile
+            .as_ref()
+            .and_then(|profile| profile.last_server_address.clone()),
+        enabled_resource_packs: previous_profile
+            .map(|profile| profile.enabled_resource_packs)
+            .unwrap_or_default(),
     };
     match train_launcher_core::profile::create_profile(profile.clone()) {
         Ok(()) => {}
@@ -958,6 +969,7 @@ async fn join_train_server(
     // 中断すると、他のMod/リソースパックが正常でも一切起動できなくなってしまう。ここでは
     // 失敗したファイルのみスキップして続行し、失敗一覧を戻り値として呼び出し側へ返す。
     let mut download_warnings: Vec<String> = Vec::new();
+    let mut installed_resource_pack_filenames: Vec<String> = Vec::new();
 
     if !server_config.mod_urls.is_empty() {
         let dest_dir = profile_game_dir.join("mods");
@@ -1001,10 +1013,60 @@ async fn join_train_server(
                     total,
                 },
             );
-            if let Err(err) = download_resolved_file(&resolved, &dest_dir).await {
-                download_warnings.push(format!("リソースパック「{}」: {err}", resolved.filename));
+            match download_resolved_file(&resolved, &dest_dir).await {
+                Ok(_) => installed_resource_pack_filenames.push(resolved.filename),
+                Err(err) => download_warnings
+                    .push(format!("リソースパック「{}」: {err}", resolved.filename)),
             }
         }
+    }
+
+    // ここまででMod・リソースパック本体のダウンロードは終わっているが、それだけでは
+    // 「候補として並ぶ」だけで実際の接続先・見た目には反映されない。TRAiN-Setup
+    // (旧クライアントセットアップツール)が行っていた、マルチプレイ一覧への登録・
+    // options.txtでのリソースパック有効化を、このランチャーでも行う。
+    let _ = app_handle.emit(
+        LAUNCH_PROGRESS_EVENT,
+        LaunchProgressPayload {
+            phase: "registering_server",
+            phase_label: "サーバーをマルチプレイ一覧に登録中...".to_string(),
+            completed: 0,
+            total: 0,
+        },
+    );
+    match train_launcher_core::server_list::upsert(
+        &profile_game_dir,
+        &profile.name,
+        &server_config.address,
+        profile.last_server_address.as_deref(),
+    ) {
+        Ok(_) => profile.last_server_address = Some(server_config.address.clone()),
+        Err(err) => download_warnings.push(format!("サーバー一覧への登録に失敗しました: {err}")),
+    }
+
+    if !installed_resource_pack_filenames.is_empty() {
+        let _ = app_handle.emit(
+            LAUNCH_PROGRESS_EVENT,
+            LaunchProgressPayload {
+                phase: "activating_resource_packs",
+                phase_label: "リソースパックを有効化中...".to_string(),
+                completed: 0,
+                total: 0,
+            },
+        );
+        if let Err(err) = train_launcher_core::resource_pack_options::apply(
+            &profile_game_dir,
+            &installed_resource_pack_filenames,
+            &mut profile.enabled_resource_packs,
+        ) {
+            download_warnings.push(format!("リソースパックの有効化に失敗しました: {err}"));
+        }
+    }
+
+    // servers.dat/options.txtへ反映した内容(last_server_address/enabled_resource_packs)を
+    // 次回起動時にも引き継げるよう保存する。失敗しても起動自体は継続する。
+    if let Err(err) = train_launcher_core::profile::update_profile(profile.clone()) {
+        eprintln!("failed to persist server registration state: {err}");
     }
 
     launch_profile(app_handle, profile).await?;

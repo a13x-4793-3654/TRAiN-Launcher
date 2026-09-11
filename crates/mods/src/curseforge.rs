@@ -9,7 +9,7 @@ use furse::structures::mod_structs::Mod;
 use furse::Furse;
 use serde::Deserialize;
 
-use crate::resolver::{DependencyRef, ModProvider, ResolveFilter, ResolvedFile};
+use crate::resolver::{sanitize_filename, DependencyRef, ModProvider, ResolveFilter, ResolvedFile};
 use crate::ModsError;
 
 /// CurseForge上でのMinecraft(Java版)のゲームID。
@@ -137,7 +137,10 @@ fn to_resolved_file(mod_info: &Mod, file: &File) -> Result<ResolvedFile, ModsErr
         project_id: mod_info.id.to_string(),
         project_name: mod_info.name.clone(),
         version_id: file.id.to_string(),
-        filename: file.file_name.clone(),
+        // `file_name`はCurseForge API(第三者がアップロードしたファイル名を含み得る)由来
+        // のため、パス区切り文字・`..`を含んでいないか正規化してから使用する
+        // (パストラバーサル対策、詳細は`sanitize_filename`のドキュメント参照)。
+        filename: sanitize_filename(&file.file_name),
         download_url: download_url.to_string(),
         sha1,
     })

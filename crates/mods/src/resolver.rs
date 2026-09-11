@@ -66,7 +66,13 @@ pub fn resolved_file_from_direct_url(url: &str) -> ResolvedFile {
     // デコードせずファイル名に使うと同一ファイルなのに毎回異なる名前で保存されてしまう。
     // これによりMod本体は同一でもファイル名違いの重複ファイルが並存し、Fabricが
     // 「重複したMod ID」としてゲーム起動を拒否する不具合につながっていた(要修正点)。
-    let filename = percent_decode(raw_segment);
+    //
+    // ただしこのデコードは `%2F`→`/`・`%5C`→`\`・`%3A`→`:` も復元してしまうため、
+    // 悪意あるURL(例: `.../mods/..%2F..%2F..%2Fevil.jar` や
+    // `.../mods/C%3A%5CWindows%5CSystem32%5Cevil.dll`)を経由すると、パス区切り文字・
+    // 親ディレクトリ参照・ドライブ文字を含む文字列がそのまま`filename`になり得る。
+    // `sanitize_filename` で単一の安全なファイル名へ正規化する(パストラバーサル対策)。
+    let filename = sanitize_filename(&percent_decode(raw_segment));
     ResolvedFile {
         provider: ModProvider::Direct,
         project_id: url.to_string(),
@@ -76,6 +82,26 @@ pub fn resolved_file_from_direct_url(url: &str) -> ResolvedFile {
         download_url: url.to_string(),
         sha1: None,
     }
+}
+
+/// 外部由来の候補文字列(URLパスセグメントや、Modrinth/CurseForge APIのファイル名フィールド
+/// など)から、ファイルシステムへの書き込み・削除先として安全な単一のファイル名を導出する。
+///
+/// [`ResolvedFile::filename`] は最終的に `dest_dir.join(&resolved.filename)` の形で
+/// ダウンロード先パスの構築(および導入済みファイルの削除)に使われる。候補文字列に
+/// ディレクトリ区切り文字(`/`・`\`)や `..`(親ディレクトリ参照)、あるいはドライブ文字を
+/// 含む絶対パスがそのまま含まれていた場合、`Path::join`はベースパス(`dest_dir`)を無視
+/// するか、`dest_dir`の外側を指すパスを組み立ててしまう(パストラバーサル/任意ファイル
+/// 書き込み・削除)。`Path::file_name()`は「通常の」最終コンポーネントのみを返し、
+/// `..`・`.`・空文字列などを無視するため、これを用いて安全な単一コンポーネントへ
+/// 正規化する。安全な名前が得られない場合は固定のフォールバック名を返す。
+pub fn sanitize_filename(name: &str) -> String {
+    Path::new(name)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("download")
+        .to_string()
 }
 
 /// URLパスセグメントの `%XX` パーセントエンコーディングをデコードする(ファイル名専用の
@@ -220,7 +246,11 @@ pub async fn download_resolved_file(
     dest_dir: &Path,
 ) -> Result<PathBuf, ModsError> {
     tokio::fs::create_dir_all(dest_dir).await?;
-    let dest = dest_dir.join(&resolved.filename);
+    // `resolved.filename`は`ResolvedFile`の各構築元(Direct/Modrinth/CurseForge)で
+    // `sanitize_filename`により正規化済みのはずだが、実際にファイルシステムへ書き込む
+    // 本関数でも多層防御として同じ正規化を適用する(`sanitize_filename`は既に安全な
+    // 名前に対しては冪等)。
+    let dest = dest_dir.join(sanitize_filename(&resolved.filename));
 
     if let Some(expected_sha1) = &resolved.sha1 {
         if let Ok(existing) = tokio::fs::read(&dest).await {
@@ -283,5 +313,56 @@ mod tests {
     fn resolved_file_from_direct_url_leaves_plain_filename_unchanged() {
         let resolved = resolved_file_from_direct_url("https://cdn.example.com/mods/plain.jar");
         assert_eq!(resolved.filename, "plain.jar");
+    }
+
+    #[test]
+    fn resolved_file_from_direct_url_rejects_path_traversal_in_last_segment() {
+        // `%2F` は `/` へデコードされるため、最終セグメント内に埋め込むと
+        // `../../../evil.jar` のような親ディレクトリ参照になり得る。
+        let resolved = resolved_file_from_direct_url(
+            "https://cdn.example.com/mods/..%2F..%2F..%2Fevil.jar",
+        );
+        assert_eq!(resolved.filename, "evil.jar");
+        assert!(!resolved.filename.contains(".."));
+        assert!(!resolved.filename.contains('/'));
+    }
+
+    #[test]
+    fn resolved_file_from_direct_url_rejects_windows_absolute_path() {
+        // `%5C`→`\`、`%3A`→`:` のデコードにより、Windowsの絶対パスが復元され得る。
+        let resolved = resolved_file_from_direct_url(
+            "https://cdn.example.com/mods/C%3A%5CWindows%5CSystem32%5Cevil.dll",
+        );
+        assert_eq!(resolved.filename, "evil.dll");
+        assert!(!resolved.filename.contains(':'));
+        assert!(!resolved.filename.contains('\\'));
+    }
+
+    #[test]
+    fn sanitize_filename_keeps_plain_names_unchanged() {
+        assert_eq!(sanitize_filename("example.jar"), "example.jar");
+        assert_eq!(sanitize_filename("Icons v.1.13.4.zip"), "Icons v.1.13.4.zip");
+    }
+
+    #[test]
+    fn sanitize_filename_strips_unix_style_traversal() {
+        assert_eq!(sanitize_filename("../../../etc/passwd"), "passwd");
+        assert_eq!(sanitize_filename("../../evil.jar"), "evil.jar");
+    }
+
+    #[test]
+    fn sanitize_filename_strips_windows_absolute_path() {
+        assert_eq!(
+            sanitize_filename("C:\\Windows\\System32\\evil.dll"),
+            "evil.dll"
+        );
+    }
+
+    #[test]
+    fn sanitize_filename_falls_back_for_degenerate_input() {
+        assert_eq!(sanitize_filename(""), "download");
+        assert_eq!(sanitize_filename(".."), "download");
+        assert_eq!(sanitize_filename("."), "download");
+        assert_eq!(sanitize_filename("/"), "download");
     }
 }

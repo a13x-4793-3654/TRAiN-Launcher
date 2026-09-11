@@ -1362,7 +1362,16 @@ async fn reset_server_profile_mods(server_id: String) -> Result<(), String> {
         .unwrap_or(true);
 
     if uses_shared_dir {
+        // `managed_mod_filenames`/`managed_resource_pack_filenames`は本来
+        // `train_launcher_mods::resolver::sanitize_filename`で正規化済みのはずだが、
+        // 本フィックス以前に保存されたプロファイルには未正規化の値が残っている可能性が
+        // あるため、削除直前にも念のため検証する(`remove_installed_file`と同じ基準)。
+        // パス区切り文字や`..`を含む場合は`dest_dir`の外側を指し得るため削除をスキップする。
         for filename in profile.managed_mod_filenames.drain(..) {
+            if filename.contains('/') || filename.contains('\\') || filename.contains("..") {
+                eprintln!("skipping unsafe managed mod filename during reset: {filename:?}");
+                continue;
+            }
             let path = game_dir.join("mods").join(&filename);
             if path.exists() {
                 tokio::fs::remove_file(&path)
@@ -1371,6 +1380,12 @@ async fn reset_server_profile_mods(server_id: String) -> Result<(), String> {
             }
         }
         for filename in profile.managed_resource_pack_filenames.drain(..) {
+            if filename.contains('/') || filename.contains('\\') || filename.contains("..") {
+                eprintln!(
+                    "skipping unsafe managed resource pack filename during reset: {filename:?}"
+                );
+                continue;
+            }
             let path = game_dir.join("resourcepacks").join(&filename);
             if path.exists() {
                 tokio::fs::remove_file(&path)

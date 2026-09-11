@@ -3,7 +3,7 @@
 use ferinth::structures::version::{DependencyType, Version, VersionFile};
 use ferinth::Ferinth;
 
-use crate::resolver::{DependencyRef, ModProvider, ResolveFilter, ResolvedFile};
+use crate::resolver::{sanitize_filename, DependencyRef, ModProvider, ResolveFilter, ResolvedFile};
 use crate::ModsError;
 
 /// Modrinth APIクライアント(未認証)を構築する。公開データの取得のみであれば認証不要。
@@ -109,7 +109,10 @@ pub async fn resolve_from_url(
         project_id: version.project_id.clone(),
         project_name: project.title,
         version_id: version.id.clone(),
-        filename: file.filename.clone(),
+        // `filename`はModrinth API(第三者がアップロードしたファイル名を含み得る)由来
+        // のため、パス区切り文字・`..`を含んでいないか正規化してから使用する
+        // (パストラバーサル対策、詳細は`sanitize_filename`のドキュメント参照)。
+        filename: sanitize_filename(&file.filename),
         download_url: file.url.to_string(),
         sha1: Some(file.hashes.sha1.clone()),
     })

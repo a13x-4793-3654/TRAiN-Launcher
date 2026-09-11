@@ -27,17 +27,19 @@ impl LauncherPaths {
     }
 
     pub fn version_dir(&self, version_id: &str) -> PathBuf {
-        self.versions_dir().join(version_id)
+        self.versions_dir().join(safe_path_component(version_id))
     }
 
     /// キャッシュ済みのバージョンJSON(取得したVersionDetailsの生データ)の保存先。
     /// 起動時に毎回Mojangへ問い合わせずに済むよう、ダウンロード時に保存しておく。
     pub fn version_json_path(&self, version_id: &str) -> PathBuf {
-        self.version_dir(version_id).join(format!("{version_id}.json"))
+        let safe_id = safe_path_component(version_id);
+        self.versions_dir().join(safe_id).join(format!("{safe_id}.json"))
     }
 
     pub fn version_jar_path(&self, version_id: &str) -> PathBuf {
-        self.version_dir(version_id).join(format!("{version_id}.jar"))
+        let safe_id = safe_path_component(version_id);
+        self.versions_dir().join(safe_id).join(format!("{safe_id}.jar"))
     }
 
     /// レガシーバージョン(LWJGL2世代)向けに展開したネイティブライブラリの保存先。
@@ -63,12 +65,32 @@ impl LauncherPaths {
     }
 
     pub fn asset_index_path(&self, assets_id: &str) -> PathBuf {
-        self.assets_dir().join("indexes").join(format!("{assets_id}.json"))
+        let safe_id = safe_path_component(assets_id);
+        self.assets_dir().join("indexes").join(format!("{safe_id}.json"))
     }
 
     pub fn asset_object_path(&self, hash: &str) -> PathBuf {
         let prefix = &hash[..hash.len().min(2)];
         self.assets_dir().join("objects").join(prefix).join(hash)
+    }
+}
+
+/// `version_id`・`assets_id` をパスの1コンポーネントとして安全に使えるよう検証する。
+///
+/// これらの値はMojangの公式バージョンマニフェスト由来のことが多いが、
+/// Forge/NeoForgeの`predicted_installer_version_id`はTRAiNサーバー設定
+/// (`minecraft_version`、管理者が設定するサーバー個別設定値)を組み込んで生成され、
+/// Fabric/Quiltの場合はローダーメタAPI(Mojang以外の第三者サービス)が返す`id`
+/// フィールドをそのまま信頼している。いずれも呼び出し元の外側にある入力のため、
+/// ディレクトリ区切り文字(`/`・`\`)や`..`(親ディレクトリ参照)が混入していた場合、
+/// そのまま`Path::join`すると`root`の外側への読み書き(パストラバーサル)を
+/// 許してしまう。安全でない場合は固定の代替名を返す(以降の処理は通常の
+/// ファイル未検出エラーとして扱われるため、追加のResult型は不要)。
+fn safe_path_component(value: &str) -> &str {
+    if value.is_empty() || value == "." || value == ".." || value.contains(['/', '\\']) {
+        "_invalid_"
+    } else {
+        value
     }
 }
 
@@ -122,3 +144,46 @@ pub fn effective_minecraft_root(override_dir: Option<&str>) -> PathBuf {
         _ => default_minecraft_root(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn version_dir_rejects_path_traversal() {
+        let paths = LauncherPaths::new(PathBuf::from("C:/minecraft"));
+        let dir = paths.version_dir("../../evil");
+        assert!(!dir.to_string_lossy().contains(".."));
+        assert_eq!(dir, paths.versions_dir().join("_invalid_"));
+    }
+
+    #[test]
+    fn version_json_path_rejects_path_traversal() {
+        let paths = LauncherPaths::new(PathBuf::from("C:/minecraft"));
+        let path = paths.version_json_path("..\\..\\evil");
+        assert!(path.starts_with(paths.versions_dir()));
+        assert!(!path.to_string_lossy().contains(".."));
+    }
+
+    #[test]
+    fn version_json_path_keeps_normal_ids_unchanged() {
+        let paths = LauncherPaths::new(PathBuf::from("C:/minecraft"));
+        let path = paths.version_json_path("1.20.1-forge-47.2.0");
+        assert_eq!(
+            path,
+            paths
+                .versions_dir()
+                .join("1.20.1-forge-47.2.0")
+                .join("1.20.1-forge-47.2.0.json")
+        );
+    }
+
+    #[test]
+    fn asset_index_path_rejects_path_traversal() {
+        let paths = LauncherPaths::new(PathBuf::from("C:/minecraft"));
+        let path = paths.asset_index_path("../../evil");
+        assert!(path.starts_with(paths.assets_dir()));
+        assert!(!path.to_string_lossy().contains(".."));
+    }
+}
+

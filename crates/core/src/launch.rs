@@ -10,9 +10,11 @@
 //! 期待する(Discordサインインはゲーム起動には使用できない)。
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
 
-use tokio::process::{Child, Command};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::process::{Child, ChildStderr, ChildStdout, Command};
 
 use crate::paths::LauncherPaths;
 use crate::profile::Profile;
@@ -205,10 +207,65 @@ pub async fn launch(
 
     tokio::fs::create_dir_all(game_dir).await?;
 
-    let child = Command::new(program)
+    let mut child = Command::new(program)
         .args(args)
         .current_dir(game_dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()?;
+
+    // GUIアプリとして起動した場合、標準出力/標準エラーを継承(inherit)してもコンソールが
+    // 存在せず出力は失われてしまう。Javaが見つからない・クラスパス不正・LWJGLネイティブの
+    // 読み込み失敗など、Minecraft自体のlogs/latest.log(Log4j初期化前に発生するため書き込まれない)
+    // にも残らない致命的な起動失敗の原因調査ができるよう、標準出力/標準エラーを
+    // `train-launcher-process.log`(game_dir直下)へ書き出す。
+    let log_path = game_dir.join("train-launcher-process.log");
+    if let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) {
+        tokio::spawn(relay_process_output_to_log(stdout, stderr, log_path));
+    }
+
     Ok(child)
+}
+
+/// 起動したMinecraftプロセスの標準出力/標準エラーを1行ずつ読み取り、
+/// `log_path` へまとめて書き出す(既存ファイルは起動の都度上書きする)。
+async fn relay_process_output_to_log(
+    stdout: ChildStdout,
+    stderr: ChildStderr,
+    log_path: PathBuf,
+) {
+    let file = match tokio::fs::File::create(&log_path).await {
+        Ok(file) => file,
+        Err(err) => {
+            eprintln!(
+                "failed to create process log file {}: {err}",
+                log_path.display()
+            );
+            return;
+        }
+    };
+    let file = std::sync::Arc::new(tokio::sync::Mutex::new(file));
+
+    let stdout_file = file.clone();
+    let stdout_task = async move {
+        let mut lines = BufReader::new(stdout).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            let mut file = stdout_file.lock().await;
+            let _ = file.write_all(line.as_bytes()).await;
+            let _ = file.write_all(b"\n").await;
+        }
+    };
+
+    let stderr_file = file.clone();
+    let stderr_task = async move {
+        let mut lines = BufReader::new(stderr).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            let mut file = stderr_file.lock().await;
+            let _ = file.write_all(line.as_bytes()).await;
+            let _ = file.write_all(b"\n").await;
+        }
+    };
+
+    tokio::join!(stdout_task, stderr_task);
 }
 

@@ -55,12 +55,18 @@ pub struct ResolvedFile {
 /// (Modrinth/CurseForgeのプロジェクトID・スラッグとして解釈する)へ渡すと誤認識されて
 /// 404になるため、解決を経由せずここでダウンロード対象として扱う。
 pub fn resolved_file_from_direct_url(url: &str) -> ResolvedFile {
-    let filename = url
+    let raw_segment = url
         .rsplit('/')
         .next()
         .filter(|segment| !segment.is_empty())
-        .unwrap_or("download")
-        .to_string();
+        .unwrap_or("download");
+    // クエリ文字列(署名付きURL等)を除いたパス部分のみをファイル名として扱う。
+    let raw_segment = raw_segment.split(['?', '#']).next().unwrap_or(raw_segment);
+    // URLパスは `%2B`(`+`)・`%20`(半角スペース)等をパーセントエンコードして含むため、
+    // デコードせずファイル名に使うと同一ファイルなのに毎回異なる名前で保存されてしまう。
+    // これによりMod本体は同一でもファイル名違いの重複ファイルが並存し、Fabricが
+    // 「重複したMod ID」としてゲーム起動を拒否する不具合につながっていた(要修正点)。
+    let filename = percent_decode(raw_segment);
     ResolvedFile {
         provider: ModProvider::Direct,
         project_id: url.to_string(),
@@ -70,6 +76,29 @@ pub fn resolved_file_from_direct_url(url: &str) -> ResolvedFile {
         download_url: url.to_string(),
         sha1: None,
     }
+}
+
+/// URLパスセグメントの `%XX` パーセントエンコーディングをデコードする(ファイル名専用の
+/// ため、クエリ文字列と異なり `+` はスペースへ変換しない)。不正なUTF-8になった場合は
+/// 元の文字列をそのまま返す。
+fn percent_decode(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hi = (bytes[i + 1] as char).to_digit(16);
+            let lo = (bytes[i + 2] as char).to_digit(16);
+            if let (Some(hi), Some(lo)) = (hi, lo) {
+                decoded.push(((hi << 4) | lo) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        decoded.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8(decoded).unwrap_or_else(|_| input.to_string())
 }
 
 /// 依存関係解決のための、他プロジェクトへの参照(URLではなく提供元+IDで表現する)。
@@ -220,4 +249,39 @@ pub async fn download_resolved_file(
 
     tokio::fs::write(&dest, &bytes).await?;
     Ok(dest)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolved_file_from_direct_url_decodes_percent_encoded_filename() {
+        let resolved = resolved_file_from_direct_url(
+            "https://cdn.modrinth.com/data/xxxx/versions/yyyy/bettercombat-fabric-2.4.0%2B1.21.1.jar",
+        );
+        assert_eq!(resolved.filename, "bettercombat-fabric-2.4.0+1.21.1.jar");
+        assert_eq!(resolved.provider, ModProvider::Direct);
+    }
+
+    #[test]
+    fn resolved_file_from_direct_url_decodes_spaces() {
+        let resolved =
+            resolved_file_from_direct_url("https://cdn.example.com/mods/Icons%20v.1.13.4.zip");
+        assert_eq!(resolved.filename, "Icons v.1.13.4.zip");
+    }
+
+    #[test]
+    fn resolved_file_from_direct_url_strips_query_string() {
+        let resolved = resolved_file_from_direct_url(
+            "https://cdn.example.com/mods/example.jar?X-Amz-Signature=abc123",
+        );
+        assert_eq!(resolved.filename, "example.jar");
+    }
+
+    #[test]
+    fn resolved_file_from_direct_url_leaves_plain_filename_unchanged() {
+        let resolved = resolved_file_from_direct_url("https://cdn.example.com/mods/plain.jar");
+        assert_eq!(resolved.filename, "plain.jar");
+    }
 }

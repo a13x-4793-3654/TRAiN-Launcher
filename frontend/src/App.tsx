@@ -30,6 +30,7 @@ import { ServersPage } from "./pages/Servers";
 import { ProfilesPage } from "./pages/Profiles";
 import { ModsPage } from "./pages/Mods";
 import { SettingsPage } from "./pages/Settings";
+import { LaunchStatusProvider, LaunchingModal } from "./LaunchStatus";
 
 const TOASTER_ID = "train-launcher-toaster";
 
@@ -256,6 +257,7 @@ function AppShell() {
         </main>
       </div>
       <Toaster toasterId={TOASTER_ID} />
+      <LaunchingModal />
     </div>
   );
 }
@@ -268,7 +270,9 @@ export default function App() {
 
   return (
     <FluentProvider theme={theme} style={{ height: "100%" }}>
-      <AppShell />
+      <LaunchStatusProvider>
+        <AppShell />
+      </LaunchStatusProvider>
     </FluentProvider>
   );
 }

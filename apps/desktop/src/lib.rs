@@ -353,6 +353,7 @@ impl From<(bool, train_launcher_mods::resolver::ResolvedFile)> for ResolvedModPa
         let provider = match resolved.provider {
             train_launcher_mods::resolver::ModProvider::Modrinth => "modrinth",
             train_launcher_mods::resolver::ModProvider::CurseForge => "curseforge",
+            train_launcher_mods::resolver::ModProvider::Direct => "direct",
         };
         ResolvedModPayload {
             provider: provider.to_string(),
@@ -851,9 +852,7 @@ async fn join_train_server(
     server_name: String,
 ) -> Result<(), String> {
     use train_launcher_core::profile::{Profile, ProfileSource};
-    use train_launcher_mods::resolver::{
-        download_resolved_file, resolve_dependencies, ModReference, ResolveFilter,
-    };
+    use train_launcher_mods::resolver::{download_resolved_file, resolved_file_from_direct_url};
 
     let _ = app_handle.emit(
         LAUNCH_PROGRESS_EVENT,
@@ -909,26 +908,17 @@ async fn join_train_server(
         Err(err) => return Err(err.to_string()),
     }
 
-    let filter = ResolveFilter {
-        minecraft_version: Some(server_config.minecraft_version.clone()),
-        mod_loader: server_config.mod_loader.clone(),
-    };
-    let curseforge_api_key = optional_curseforge_api_key();
     let profile_game_dir = profile.effective_game_dir(&minecraft_root());
 
+    // TRAiNサーバー設定のmod_urls/resource_pack_urlsは、TRAiN側で既にバージョン適合・
+    // 再配布可否の確認を終えた直接ダウンロードURL(Modrinth/CurseForgeのプロジェクトページ
+    // URLではない)。resolve_dependencies()/resource_pack::install_from_url()へ渡すと
+    // プロジェクトID・スラッグとして誤認識され404になるため、解決を経由せず直接ダウンロード
+    // する(詳細はTRAiNリポジトリの docs/LAUNCHER-API.md 参照)。
     if !server_config.mod_urls.is_empty() {
-        let references = server_config
-            .mod_urls
-            .iter()
-            .map(|url| ModReference { url: url.clone() })
-            .collect();
-        let resolved = resolve_dependencies(references, &filter, curseforge_api_key.as_deref())
-            .await
-            .map_err(|err| err.to_string())?;
-
         let dest_dir = profile_game_dir.join("mods");
-        let total = resolved.len();
-        for (index, file) in resolved.iter().enumerate() {
+        let total = server_config.mod_urls.len();
+        for (index, url) in server_config.mod_urls.iter().enumerate() {
             let _ = app_handle.emit(
                 LAUNCH_PROGRESS_EVENT,
                 LaunchProgressPayload {
@@ -938,7 +928,8 @@ async fn join_train_server(
                     total,
                 },
             );
-            download_resolved_file(file, &dest_dir)
+            let resolved = resolved_file_from_direct_url(url);
+            download_resolved_file(&resolved, &dest_dir)
                 .await
                 .map_err(|err| err.to_string())?;
         }
@@ -957,18 +948,48 @@ async fn join_train_server(
                     total,
                 },
             );
-            train_launcher_mods::resource_pack::install_from_url(
-                url,
-                Some(&server_config.minecraft_version),
-                curseforge_api_key.as_deref(),
-                &dest_dir,
-            )
-            .await
-            .map_err(|err| err.to_string())?;
+            let resolved = resolved_file_from_direct_url(url);
+            download_resolved_file(&resolved, &dest_dir)
+                .await
+                .map_err(|err| err.to_string())?;
         }
     }
 
     launch_profile(app_handle, profile).await
+}
+
+/// TRAiNサーバー専用プロファイルの導入済みMod・リソースパックを削除する(「初期化」用)。
+///
+/// ダウンロード済みファイルが壊れている/中途半端な更新で不整合が起きた場合の復旧手段。
+/// ワールドデータ・設定ファイル(`saves`/`options.txt`等)には触れず、`mods`/
+/// `resourcepacks` ディレクトリの中身のみを削除する。まだ一度も参加していないサーバー
+/// (プロファイル未作成)の場合は何もせず正常終了する。次回「起動」を押すと
+/// `join_train_server` が全ファイルを再ダウンロードする。
+#[tauri::command]
+async fn reset_server_profile_mods(server_id: String) -> Result<(), String> {
+    let profile_id = format!("train-{server_id}");
+    let profile = match train_launcher_core::profile::get_profile(&profile_id) {
+        Ok(profile) => profile,
+        Err(train_launcher_core::CoreError::ProfileNotFound(_)) => return Ok(()),
+        Err(err) => return Err(err.to_string()),
+    };
+    let game_dir = profile.effective_game_dir(&minecraft_root());
+
+    for sub_dir in ["mods", "resourcepacks"] {
+        let dir = game_dir.join(sub_dir);
+        if !dir.exists() {
+            continue;
+        }
+        let mut entries = tokio::fs::read_dir(&dir).await.map_err(|err| err.to_string())?;
+        while let Some(entry) = entries.next_entry().await.map_err(|err| err.to_string())? {
+            if entry.file_type().await.map(|ft| ft.is_file()).unwrap_or(false) {
+                tokio::fs::remove_file(entry.path())
+                    .await
+                    .map_err(|err| err.to_string())?;
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1002,6 +1023,7 @@ pub fn run() {
             remove_installed_resource_pack,
             launch_minecraft,
             join_train_server,
+            reset_server_profile_mods,
             get_app_settings,
             save_app_settings,
         ])

@@ -21,6 +21,7 @@ import { PlayRegular, InfoRegular } from "@fluentui/react-icons";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { ServerDetailPage } from "./ServerDetail";
+import { useLaunchStatus } from "../LaunchStatus";
 
 const TOASTER_ID = "servers-toaster";
 const GAME_EXITED_EVENT = "game://exited";
@@ -84,6 +85,7 @@ const useStyles = makeStyles({
 export function ServersPage() {
   const styles = useStyles();
   const { dispatchToast } = useToastController(TOASTER_ID);
+  const { beginLaunch, endLaunch } = useLaunchStatus();
 
   const [authLoading, setAuthLoading] = useState(true);
   const [discordSignedIn, setDiscordSignedIn] = useState(false);
@@ -150,6 +152,7 @@ export function ServersPage() {
   const handleJoin = (server: MemberServer) => {
     setLaunchingId(server.id);
     setProgress(null);
+    beginLaunch();
     invoke("join_train_server", {
       serverId: server.id,
       serverName: server.name,
@@ -177,6 +180,7 @@ export function ServersPage() {
       .finally(() => {
         setLaunchingId(null);
         setProgress(null);
+        endLaunch();
       });
   };
 

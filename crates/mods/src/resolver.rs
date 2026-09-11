@@ -17,6 +17,9 @@ use crate::{curseforge, modrinth, ModsError};
 pub enum ModProvider {
     Modrinth,
     CurseForge,
+    /// TRAiNサーバー設定など、呼び出し元が既にバージョン適合/再配布可否を確認済みの
+    /// 直接ダウンロードURL(Modrinth/CurseForgeのプロジェクトIDを持たない)。
+    Direct,
 }
 
 /// URLにバージョンが明示されていない場合に、互換性のある最新バージョンを選ぶための絞り込み条件。
@@ -41,6 +44,32 @@ pub struct ResolvedFile {
     pub download_url: String,
     /// CurseForgeはファイルによってはSHA1を提供しないため任意項目。
     pub sha1: Option<String>,
+}
+
+/// 既に解決済みの直接ダウンロードURLを、`download_resolved_file`にそのまま渡せる
+/// `ResolvedFile`へ変換する。
+///
+/// TRAiNサーバー設定の`mod_urls`/`resource_pack_urls`は、Modrinth/CurseForgeの
+/// プロジェクトページURLではなく、サーバー側で既にバージョン適合・再配布可否の確認を
+/// 終えた直接ダウンロードURL。`resolve_dependencies`/`resource_pack::resolve_from_url`
+/// (Modrinth/CurseForgeのプロジェクトID・スラッグとして解釈する)へ渡すと誤認識されて
+/// 404になるため、解決を経由せずここでダウンロード対象として扱う。
+pub fn resolved_file_from_direct_url(url: &str) -> ResolvedFile {
+    let filename = url
+        .rsplit('/')
+        .next()
+        .filter(|segment| !segment.is_empty())
+        .unwrap_or("download")
+        .to_string();
+    ResolvedFile {
+        provider: ModProvider::Direct,
+        project_id: url.to_string(),
+        project_name: filename.clone(),
+        version_id: String::new(),
+        filename,
+        download_url: url.to_string(),
+        sha1: None,
+    }
 }
 
 /// 依存関係解決のための、他プロジェクトへの参照(URLではなく提供元+IDで表現する)。

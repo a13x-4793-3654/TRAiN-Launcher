@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   Body1,
   Caption1,
@@ -11,10 +11,21 @@ import {
   Field,
   MessageBar,
   MessageBarBody,
+  Dialog,
+  DialogSurface,
+  DialogBody,
+  DialogTitle,
+  DialogContent,
+  DialogActions,
   makeStyles,
   tokens,
 } from "@fluentui/react-components";
-import { ArrowLeftRegular, PlayRegular } from "@fluentui/react-icons";
+import {
+  ArrowLeftRegular,
+  PlayRegular,
+  ArrowSyncRegular,
+  ArrowResetRegular,
+} from "@fluentui/react-icons";
 import { invoke } from "@tauri-apps/api/core";
 
 interface MemberServer {
@@ -42,6 +53,14 @@ const useStyles = makeStyles({
   backRow: {
     marginBottom: tokens.spacingVerticalM,
   },
+  commandBar: {
+    display: "flex",
+    alignItems: "center",
+    gap: tokens.spacingHorizontalS,
+    flexWrap: "wrap",
+    marginTop: tokens.spacingVerticalM,
+    marginBottom: tokens.spacingVerticalM,
+  },
   section: {
     marginTop: tokens.spacingVerticalXL,
   },
@@ -56,9 +75,7 @@ const useStyles = makeStyles({
     flexDirection: "column",
     gap: tokens.spacingVerticalXS,
     marginTop: tokens.spacingVerticalM,
-  },
-  joinRow: {
-    marginTop: tokens.spacingVerticalL,
+    width: "100%",
   },
 });
 
@@ -70,6 +87,10 @@ const useStyles = makeStyles({
  * Mod/リソースパックのURL一覧を確認できる。実際の参加・起動処理(`join_train_server`の
  * 呼び出し、進捗表示、完了/失敗トースト)は `ServersPage` 側で一元管理しており、
  * このコンポーネントは表示と `onJoin` の呼び出しのみを担当する。
+ *
+ * 「起動」「更新」「初期化」は画面上部のコマンドバーにまとめている。Mod一覧が多い
+ * サーバーだと接続情報・Mod一覧が縦に長くなり、ボタンを最下部に置くとスクロールが
+ * 必要になっていたため、常に見える位置に移動した。
  */
 export function ServerDetailPage(props: {
   server: MemberServer;
@@ -84,15 +105,45 @@ export function ServerDetailPage(props: {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
+  const [resetDialogOpen, setResetDialogOpen] = useState(false);
+  const [resetting, setResetting] = useState(false);
+  const [resetMessage, setResetMessage] = useState<
+    { intent: "success" | "error"; text: string } | null
+  >(null);
+
+  const loadConfig = useCallback(() => {
     setLoading(true);
     setError(null);
-    setConfig(null);
     invoke<ServerConfig>("get_server_config", { serverId: props.server.id })
       .then(setConfig)
       .catch((err) => setError(String(err)))
       .finally(() => setLoading(false));
   }, [props.server.id]);
+
+  useEffect(() => {
+    setConfig(null);
+    loadConfig();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.server.id]);
+
+  const handleReset = () => {
+    setResetting(true);
+    setResetMessage(null);
+    invoke("reset_server_profile_mods", { serverId: props.server.id })
+      .then(() => {
+        setResetMessage({
+          intent: "success",
+          text: "導入済みのMod・リソースパックを削除しました。次回「起動」時に再ダウンロードします。",
+        });
+      })
+      .catch((err) =>
+        setResetMessage({ intent: "error", text: `初期化に失敗しました: ${String(err)}` }),
+      )
+      .finally(() => {
+        setResetting(false);
+        setResetDialogOpen(false);
+      });
+  };
 
   return (
     <div>
@@ -108,6 +159,52 @@ export function ServerDetailPage(props: {
       <Caption1 as="p" block>
         {props.server.id}
       </Caption1>
+
+      <div className={styles.commandBar}>
+        <Button
+          appearance="primary"
+          icon={props.joining ? <Spinner size="tiny" /> : <PlayRegular />}
+          disabled={props.joining || loading || !config}
+          onClick={props.onJoin}
+        >
+          起動
+        </Button>
+        <Button
+          appearance="secondary"
+          icon={loading ? <Spinner size="tiny" /> : <ArrowSyncRegular />}
+          disabled={props.joining || loading}
+          onClick={loadConfig}
+        >
+          更新
+        </Button>
+        <Button
+          appearance="secondary"
+          icon={<ArrowResetRegular />}
+          disabled={props.joining || resetting}
+          onClick={() => setResetDialogOpen(true)}
+        >
+          初期化
+        </Button>
+      </div>
+
+      {props.joining && (
+        <div className={styles.progressArea}>
+          <ProgressBar
+            value={
+              props.progress && props.progress.total > 0
+                ? props.progress.completed / props.progress.total
+                : undefined
+            }
+          />
+          <Caption1>{props.progress?.phase_label ?? "準備中..."}</Caption1>
+        </div>
+      )}
+
+      {resetMessage && (
+        <MessageBar intent={resetMessage.intent} className={styles.section}>
+          <MessageBarBody>{resetMessage.text}</MessageBarBody>
+        </MessageBar>
+      )}
 
       {loading ? (
         <Spinner size="small" label="サーバー設定を取得中..." />
@@ -165,33 +262,48 @@ export function ServerDetailPage(props: {
               </div>
             )}
           </div>
-
-          <div className={styles.joinRow}>
-            <Button
-              appearance="primary"
-              icon={props.joining ? <Spinner size="tiny" /> : <PlayRegular />}
-              disabled={props.joining}
-              onClick={props.onJoin}
-            >
-              参加してMinecraftを起動
-            </Button>
-            {props.joining && (
-              <div className={styles.progressArea}>
-                <ProgressBar
-                  value={
-                    props.progress && props.progress.total > 0
-                      ? props.progress.completed / props.progress.total
-                      : undefined
-                  }
-                />
-                <Caption1>
-                  {props.progress?.phase_label ?? "準備中..."}
-                </Caption1>
-              </div>
-            )}
-          </div>
         </>
       ) : null}
+
+      <Dialog
+        open={resetDialogOpen}
+        onOpenChange={(_event, data) => {
+          if (!resetting) {
+            setResetDialogOpen(data.open);
+          }
+        }}
+      >
+        <DialogSurface>
+          <DialogBody>
+            <DialogTitle>Mod・リソースパックの初期化</DialogTitle>
+            <DialogContent>
+              <Body1>
+                このサーバー専用プロファイルに導入済みのMod・リソースパックを
+                すべて削除します。ワールドデータや設定は削除されません。
+                次回「起動」時にサーバー設定に基づいて再ダウンロードします。
+                よろしいですか?
+              </Body1>
+            </DialogContent>
+            <DialogActions>
+              <Button
+                appearance="secondary"
+                onClick={() => setResetDialogOpen(false)}
+                disabled={resetting}
+              >
+                キャンセル
+              </Button>
+              <Button
+                appearance="primary"
+                icon={resetting ? <Spinner size="tiny" /> : undefined}
+                disabled={resetting}
+                onClick={handleReset}
+              >
+                初期化する
+              </Button>
+            </DialogActions>
+          </DialogBody>
+        </DialogSurface>
+      </Dialog>
     </div>
   );
 }

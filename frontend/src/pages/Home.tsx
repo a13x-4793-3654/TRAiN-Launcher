@@ -23,6 +23,7 @@ import { PlayRegular } from "@fluentui/react-icons";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { NavKey } from "../App";
+import { useLaunchStatus } from "../LaunchStatus";
 
 const TOASTER_ID = "home-toaster";
 const GAME_EXITED_EVENT = "game://exited";
@@ -121,6 +122,7 @@ function formatLastLaunched(iso: string): string {
 export function HomePage({ onNavigate }: { onNavigate: (key: NavKey) => void }) {
   const styles = useStyles();
   const { dispatchToast } = useToastController(TOASTER_ID);
+  const { beginLaunch, endLaunch } = useLaunchStatus();
 
   const [authStatus, setAuthStatus] = useState<AuthStatus>({
     discord_display_name: null,
@@ -189,6 +191,7 @@ export function HomePage({ onNavigate }: { onNavigate: (key: NavKey) => void }) 
   const handleLaunch = (profile: Profile) => {
     setLaunchingId(profile.id);
     setProgress(null);
+    beginLaunch();
     invoke("launch_minecraft", { profileId: profile.id })
       .then(() => {
         dispatchToast(
@@ -214,6 +217,7 @@ export function HomePage({ onNavigate }: { onNavigate: (key: NavKey) => void }) 
       .finally(() => {
         setLaunchingId(null);
         setProgress(null);
+        endLaunch();
       });
   };
 

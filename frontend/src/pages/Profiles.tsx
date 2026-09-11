@@ -39,6 +39,7 @@ import {
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
+import { useLaunchStatus } from "../LaunchStatus";
 
 const TOASTER_ID = "profiles-toaster";
 const GAME_EXITED_EVENT = "game://exited";
@@ -179,6 +180,7 @@ const useStyles = makeStyles({
 export function ProfilesPage() {
   const styles = useStyles();
   const { dispatchToast } = useToastController(TOASTER_ID);
+  const { beginLaunch, endLaunch } = useLaunchStatus();
 
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [profilesLoading, setProfilesLoading] = useState(true);
@@ -423,6 +425,7 @@ export function ProfilesPage() {
   const handleLaunch = (profile: Profile) => {
     setLaunchingId(profile.id);
     setProgress(null);
+    beginLaunch();
     invoke("launch_minecraft", { profileId: profile.id })
       .then(() => {
         dispatchToast(
@@ -448,6 +451,7 @@ export function ProfilesPage() {
       .finally(() => {
         setLaunchingId(null);
         setProgress(null);
+        endLaunch();
       });
   };
 

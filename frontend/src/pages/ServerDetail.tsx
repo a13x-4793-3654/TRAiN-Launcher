@@ -112,6 +112,13 @@ const useStyles = makeStyles({
     gap: tokens.spacingVerticalS,
     marginTop: tokens.spacingVerticalM,
   },
+  // CardHeaderのactionスロットは既定でheader/descriptionの幅に押されて縮むため、
+  // 何も指定しないとBadgeの短いラベル("情報"等)が縦に折り返されてしまう。
+  // 縮まない・折り返さないよう明示する。
+  severityBadge: {
+    flexShrink: 0,
+    whiteSpace: "nowrap",
+  },
   progressArea: {
     display: "flex",
     flexDirection: "column",
@@ -282,16 +289,18 @@ export function ServerDetailPage(props: {
                     </Caption1>
                   }
                   action={
-                    <Badge
-                      appearance="tint"
-                      color={
-                        SEVERITY_BADGE_COLOR[announcement.severity] ??
-                        "informative"
-                      }
-                    >
-                      {SEVERITY_LABEL[announcement.severity] ??
-                        announcement.severity}
-                    </Badge>
+                    <div className={styles.severityBadge}>
+                      <Badge
+                        appearance="tint"
+                        color={
+                          SEVERITY_BADGE_COLOR[announcement.severity] ??
+                          "informative"
+                        }
+                      >
+                        {SEVERITY_LABEL[announcement.severity] ??
+                          announcement.severity}
+                      </Badge>
+                    </div>
                   }
                 />
                 <Body1 as="p" block>

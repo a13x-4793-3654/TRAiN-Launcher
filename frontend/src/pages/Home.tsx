@@ -51,6 +51,17 @@ interface Announcement {
   published_at: string;
 }
 
+// Home画面では全体のお知らせと所属サーバーのお知らせをまとめて時系列表示するため、
+// 由来(グローバル/サーバー名)を1件ずつ保持する。
+interface AnnouncementItem extends Announcement {
+  source: string;
+}
+
+interface MemberServer {
+  id: string;
+  name: string;
+}
+
 interface GameExitedPayload {
   exit_code: number | null;
 }
@@ -107,6 +118,13 @@ const useStyles = makeStyles({
     gap: tokens.spacingVerticalXS,
     marginTop: tokens.spacingVerticalS,
   },
+  // CardHeaderのactionスロットは既定でheader/descriptionの幅に押されて縮むため、
+  // 何も指定しないとBadgeの短いラベル("情報"等)が縦に折り返されてしまう。
+  // 縮まない・折り返さないよう明示する。
+  severityBadge: {
+    flexShrink: 0,
+    whiteSpace: "nowrap",
+  },
 });
 
 const dateTimeFormatter = new Intl.DateTimeFormat("ja-JP", {
@@ -153,7 +171,7 @@ export function HomePage({ onNavigate }: { onNavigate: (key: NavKey) => void }) 
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [profilesLoading, setProfilesLoading] = useState(true);
 
-  const [announcements, setAnnouncements] = useState<Announcement[]>([]);
+  const [announcements, setAnnouncements] = useState<AnnouncementItem[]>([]);
   const [announcementsLoading, setAnnouncementsLoading] = useState(true);
 
   const [launchingId, setLaunchingId] = useState<string | null>(null);
@@ -177,13 +195,65 @@ export function HomePage({ onNavigate }: { onNavigate: (key: NavKey) => void }) 
       .finally(() => setProfilesLoading(false));
   }, []);
 
+  // グローバルのお知らせと、Discordでサインイン済みの場合は所属サーバーのお知らせも
+  // まとめて取得し、公開日時の新しい順に並べてホーム画面へ表示する。
+  // サーバー一覧の取得(list_member_servers)にはDiscordサインインが必須のため、
+  // authLoadingが解決してからサインイン状況に応じて分岐する。
   useEffect(() => {
+    if (authLoading) return;
+    let cancelled = false;
     setAnnouncementsLoading(true);
-    invoke<Announcement[]>("get_global_announcements")
-      .then(setAnnouncements)
-      .catch((err) => console.error("failed to load announcements", err))
-      .finally(() => setAnnouncementsLoading(false));
-  }, []);
+
+    const globalPromise = invoke<Announcement[]>("get_global_announcements")
+      .then((items) => items.map((item) => ({ ...item, source: "全体" })))
+      .catch((err) => {
+        console.error("failed to load global announcements", err);
+        return [] as AnnouncementItem[];
+      });
+
+    const serverPromise = authStatus.discord_display_name
+      ? invoke<MemberServer[]>("list_member_servers")
+          .then((servers) =>
+            Promise.all(
+              servers.map((server) =>
+                invoke<Announcement[]>("get_server_announcements", {
+                  serverId: server.id,
+                })
+                  .then((items) =>
+                    items.map((item) => ({ ...item, source: server.name })),
+                  )
+                  .catch((err) => {
+                    console.error(
+                      `failed to load announcements for server ${server.id}`,
+                      err,
+                    );
+                    return [] as AnnouncementItem[];
+                  }),
+              ),
+            ).then((lists) => lists.flat()),
+          )
+          .catch((err) => {
+            console.error("failed to load member servers for announcements", err);
+            return [] as AnnouncementItem[];
+          })
+      : Promise.resolve<AnnouncementItem[]>([]);
+
+    Promise.all([globalPromise, serverPromise])
+      .then(([globalItems, serverItems]) => {
+        if (cancelled) return;
+        const merged = [...globalItems, ...serverItems].sort((a, b) =>
+          b.published_at.localeCompare(a.published_at),
+        );
+        setAnnouncements(merged);
+      })
+      .finally(() => {
+        if (!cancelled) setAnnouncementsLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [authLoading, authStatus.discord_display_name]);
 
   useEffect(() => {
     const unlisten = listen<GameExitedPayload>(GAME_EXITED_EVENT, (event) => {
@@ -267,6 +337,52 @@ export function HomePage({ onNavigate }: { onNavigate: (key: NavKey) => void }) 
       <Body1 as="p" block>
         TRAiN Launcherへようこそ。
       </Body1>
+
+      <div className={styles.section}>
+        <Title3 as="h3" block>
+          お知らせ
+        </Title3>
+        {announcementsLoading ? (
+          <Spinner size="small" label="読み込み中..." />
+        ) : announcements.length === 0 ? (
+          <Body1 as="p" block>
+            現在お知らせはありません。
+          </Body1>
+        ) : (
+          <div className={styles.list}>
+            {announcements.map((announcement) => (
+              <Card key={`${announcement.source}-${announcement.id}`}>
+                <CardHeader
+                  header={<Text weight="semibold">{announcement.title}</Text>}
+                  description={
+                    <Caption1>
+                      {announcement.source} ・{" "}
+                      {formatLastLaunched(announcement.published_at)}
+                    </Caption1>
+                  }
+                  action={
+                    <div className={styles.severityBadge}>
+                      <Badge
+                        appearance="tint"
+                        color={
+                          SEVERITY_BADGE_COLOR[announcement.severity] ??
+                          "informative"
+                        }
+                      >
+                        {SEVERITY_LABEL[announcement.severity] ??
+                          announcement.severity}
+                      </Badge>
+                    </div>
+                  }
+                />
+                <Body1 as="p" block>
+                  {announcement.body}
+                </Body1>
+              </Card>
+            ))}
+          </div>
+        )}
+      </div>
 
       <div className={styles.section}>
         <Title3 as="h3" block>
@@ -370,49 +486,6 @@ export function HomePage({ onNavigate }: { onNavigate: (key: NavKey) => void }) 
                     <Caption1>{progress?.phase_label ?? "準備中..."}</Caption1>
                   </div>
                 )}
-              </Card>
-            ))}
-          </div>
-        )}
-      </div>
-
-      <div className={styles.section}>
-        <Title3 as="h3" block>
-          お知らせ
-        </Title3>
-        {announcementsLoading ? (
-          <Spinner size="small" label="読み込み中..." />
-        ) : announcements.length === 0 ? (
-          <Body1 as="p" block>
-            現在お知らせはありません。
-          </Body1>
-        ) : (
-          <div className={styles.list}>
-            {announcements.map((announcement) => (
-              <Card key={announcement.id}>
-                <CardHeader
-                  header={<Text weight="semibold">{announcement.title}</Text>}
-                  description={
-                    <Caption1>
-                      {formatLastLaunched(announcement.published_at)}
-                    </Caption1>
-                  }
-                  action={
-                    <Badge
-                      appearance="tint"
-                      color={
-                        SEVERITY_BADGE_COLOR[announcement.severity] ??
-                        "informative"
-                      }
-                    >
-                      {SEVERITY_LABEL[announcement.severity] ??
-                        announcement.severity}
-                    </Badge>
-                  }
-                />
-                <Body1 as="p" block>
-                  {announcement.body}
-                </Body1>
               </Card>
             ))}
           </div>

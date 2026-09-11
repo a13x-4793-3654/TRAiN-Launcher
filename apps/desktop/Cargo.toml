@@ -27,3 +27,9 @@ train-launcher-auth = { path = "../../crates/auth" }
 train-launcher-mods = { path = "../../crates/mods" }
 train-launcher-server-api = { path = "../../crates/train-api" }
 tauri-plugin-dialog = "2.7.3"
+
+[dev-dependencies]
+# 共有 `.minecraft` フォルダの管理ファイル整理ロジック(`prune_stale_managed_files`)の
+# テストで、実ファイルシステム上に隔離した一時ディレクトリを作るために使用。
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

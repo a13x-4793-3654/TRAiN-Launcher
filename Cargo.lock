@@ -5024,6 +5024,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-dialog",
  "tauri-plugin-opener",
+ "tempfile",
  "tokio",
  "train-launcher-auth",
  "train-launcher-core",

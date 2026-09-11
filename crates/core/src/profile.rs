@@ -87,6 +87,15 @@ pub struct Profile {
     /// 毎回勝手に戻さないための判定に使う。
     #[serde(default)]
     pub enabled_resource_packs: Vec<String>,
+    /// TRAiNがこのプロファイルのために共有 `.minecraft/mods` へ配置したファイル名一覧。
+    /// サーバー切り替え時に、このプロファイルが配置したファイルだけを安全に削除するために使う
+    /// (ユーザーが手動で追加したMod・他プロファイルが配置したファイルには一切触れない)。
+    /// `game_dir` を独自指定しているプロファイル(共有フォルダを使わない)では常に空。
+    #[serde(default)]
+    pub managed_mod_filenames: Vec<String>,
+    /// 同様に `.minecraft/resourcepacks` へ配置したファイル名一覧。
+    #[serde(default)]
+    pub managed_resource_pack_filenames: Vec<String>,
 }
 
 impl Profile {
@@ -169,6 +178,8 @@ fn official_to_profile(official: OfficialProfile) -> Profile {
         last_launched_at: None,
         last_server_address: None,
         enabled_resource_packs: Vec::new(),
+        managed_mod_filenames: Vec::new(),
+        managed_resource_pack_filenames: Vec::new(),
     }
 }
 
@@ -303,6 +314,8 @@ mod tests {
             last_launched_at: None,
             last_server_address: None,
             enabled_resource_packs: Vec::new(),
+            managed_mod_filenames: Vec::new(),
+            managed_resource_pack_filenames: Vec::new(),
         }
     }
 

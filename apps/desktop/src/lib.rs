@@ -718,6 +718,73 @@ impl From<train_launcher_core::download::DownloadProgress> for LaunchProgressPay
     }
 }
 
+/// 保存済みのMicrosoftトークンを、起動に使えることが確実な状態にして返す。
+///
+/// MSAのアクセストークンは短命(数十分〜1時間程度)であり、そこから交換したMinecraft
+/// アクセストークンも無期限ではない。サインイン時に取得したトークンをそのまま使い続けると、
+/// 数時間〜数日後には「起動したMinecraft自体で認証エラーになり再起動を求められる」形で
+/// 失敗する(ゲームプロセス自体はエラーの詳細をTRAiN Launcher側へ返さないため、事前に
+/// 検知できない)。これを避けるため、起動のたびに保存済み `refresh_token` を使って
+/// MSAアクセストークン→Minecraftアクセストークンの交換をやり直し、常に新しいトークンで
+/// 起動する(公式ランチャーと同様の挙動)。
+///
+/// リフレッシュに失敗した場合(リフレッシュトークン自体が失効済み等)は、保存済みの
+/// 資格情報を削除した上でエラーを返す。呼び出し側は「Microsoftアカウントで再度
+/// サインインしてください」という趣旨のメッセージをそのままユーザーに表示できる。
+async fn ensure_valid_microsoft_token() -> Result<TokenRecord, String> {
+    let token = store::load_token(Provider::Microsoft)
+        .map_err(|err| err.to_string())?
+        .ok_or_else(|| "Microsoftアカウントでサインインしてください".to_string())?;
+
+    let Some(refresh_token) = token.refresh_token.clone() else {
+        // リフレッシュトークンが無い(本機能追加前にサインインした等)場合は、
+        // 保存済みのアクセストークンをそのまま使う以外に手段が無い。
+        return Ok(token);
+    };
+
+    let config = config::MicrosoftConfig::from_env().map_err(|err| err.to_string())?;
+    let refresh_result = async {
+        let msa_token = msa::refresh_access_token(&config, &refresh_token)
+            .await
+            .map_err(|err| err.to_string())?;
+        let minecraft_token = xbox::exchange_microsoft_token(&msa_token.access_token)
+            .await
+            .map_err(|err| err.to_string())?;
+        Ok::<_, String>((msa_token, minecraft_token))
+    }
+    .await;
+
+    let (msa_token, minecraft_token) = match refresh_result {
+        Ok(result) => result,
+        Err(err) => {
+            // リフレッシュトークン自体が失効している等、リフレッシュそのものが失敗した場合は
+            // 古い資格情報を残しても再利用できないため削除し、ユーザーに再サインインを促す。
+            let _ = store::delete_token(Provider::Microsoft);
+            return Err(format!(
+                "Microsoftアカウントの認証が期限切れです。再度サインインしてください({err})"
+            ));
+        }
+    };
+
+    let display_name = minecraft_token
+        .username
+        .clone()
+        .or_else(|| token.display_name.clone())
+        .unwrap_or_else(|| "Minecraftプレイヤー(ユーザー名取得失敗)".to_string());
+    let uuid = minecraft_token.uuid.clone().or_else(|| token.uuid.clone());
+
+    let refreshed = TokenRecord {
+        access_token: minecraft_token.access_token,
+        refresh_token: msa_token.refresh_token,
+        expires_at: msa_token.expires_at,
+        display_name: Some(display_name),
+        uuid,
+        user_id: token.user_id.clone(),
+    };
+    store::save_token(Provider::Microsoft, &refreshed).map_err(|err| err.to_string())?;
+    Ok(refreshed)
+}
+
 /// プロファイルを指定してMinecraftをダウンロード(未取得分のみ)した上で起動する
 /// (`launch_minecraft`/`join_train_server` 共通の実装)。
 ///
@@ -742,9 +809,7 @@ async fn launch_profile(
         profile.java_path = settings.java_path;
     }
 
-    let token = store::load_token(Provider::Microsoft)
-        .map_err(|err| err.to_string())?
-        .ok_or_else(|| "Microsoftアカウントでサインインしてください".to_string())?;
+    let token = ensure_valid_microsoft_token().await?;
     let uuid = token.uuid.clone().ok_or_else(|| {
         "MinecraftのUUIDが取得できていません。サインアウトして再度サインインしてください"
             .to_string()
@@ -873,6 +938,80 @@ async fn launch_minecraft(app_handle: AppHandle, profile_id: String) -> Result<(
     launch_profile(app_handle, profile).await
 }
 
+/// `filenames` の中から `keep` に含まれないものを `dir` から削除し、削除後(=`keep`との
+/// 共通部分のみを残した)一覧を返す。`join_train_server` が、共有フォルダを使う各TRAiN
+/// プロファイルの管理ファイルを整理するために使う。個別のファイル削除に失敗しても処理は
+/// 継続する(ログ出力のみ)。
+async fn prune_stale_managed_files(
+    filenames: &[String],
+    keep: &std::collections::HashSet<String>,
+    dir: &std::path::Path,
+) -> Vec<String> {
+    let mut remaining = Vec::new();
+    for filename in filenames {
+        if keep.contains(filename) {
+            remaining.push(filename.clone());
+            continue;
+        }
+        let path = dir.join(filename);
+        if path.exists() {
+            if let Err(err) = tokio::fs::remove_file(&path).await {
+                eprintln!("failed to remove stale managed file {path:?}: {err}");
+            }
+        }
+    }
+    remaining
+}
+
+#[cfg(test)]
+mod prune_stale_managed_files_tests {
+    use super::prune_stale_managed_files;
+    use std::collections::HashSet;
+
+    #[tokio::test]
+    async fn removes_files_not_in_keep_set_and_returns_remaining() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("old-mod.jar"), b"old").unwrap();
+        std::fs::write(dir.path().join("kept-mod.jar"), b"kept").unwrap();
+
+        let filenames = vec!["old-mod.jar".to_string(), "kept-mod.jar".to_string()];
+        let keep: HashSet<String> = ["kept-mod.jar".to_string()].into_iter().collect();
+
+        let remaining = prune_stale_managed_files(&filenames, &keep, dir.path()).await;
+
+        assert_eq!(remaining, vec!["kept-mod.jar".to_string()]);
+        assert!(!dir.path().join("old-mod.jar").exists());
+        assert!(dir.path().join("kept-mod.jar").exists());
+    }
+
+    #[tokio::test]
+    async fn does_not_touch_files_outside_the_managed_list() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("user-added.jar"), b"user").unwrap();
+
+        // 「user-added.jar」は呼び出し側(このプロファイルの管理ファイル一覧)に
+        // 含まれていないため、keepが空でも削除対象にならないことを確認する。
+        let filenames: Vec<String> = Vec::new();
+        let keep: HashSet<String> = HashSet::new();
+
+        let remaining = prune_stale_managed_files(&filenames, &keep, dir.path()).await;
+
+        assert!(remaining.is_empty());
+        assert!(dir.path().join("user-added.jar").exists());
+    }
+
+    #[tokio::test]
+    async fn missing_file_in_managed_list_is_silently_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let filenames = vec!["already-deleted.jar".to_string()];
+        let keep: HashSet<String> = HashSet::new();
+
+        let remaining = prune_stale_managed_files(&filenames, &keep, dir.path()).await;
+
+        assert!(remaining.is_empty());
+    }
+}
+
 /// TRAiN管理サーバーへ参加する。
 ///
 /// サーバー設定(`ServerConfig`、接続先/Minecraftバージョン/Modローダー/Mod・リソースパック
@@ -914,22 +1053,20 @@ async fn join_train_server(
 
     // サーバーごとに固定のプロファイルIDを使う(再度参加した場合は同じプロファイルを更新し、
     // サーバー側の設定変更をそのまま反映する)。
-    // TRAiNサーバーごとに要求されるMod構成は異なるため、サーバーごとに専用のゲーム
-    // ディレクトリを自動割り当てし、他のサーバー/プロファイルとMod・リソースパックが
-    // 混在しないようにする(バージョンjar・ライブラリ・アセットは引き続き共通ディレクトリを
-    // 再利用する)。
-    let game_dir = train_launcher_core::paths::default_launcher_root()
-        .join("server-profiles")
-        .join(&server_id)
-        .display()
-        .to_string();
+    // Mod・リソースパックは公式Minecraft Launcherと共有する `.minecraft` フォルダ
+    // (`game_dir: None` → `effective_game_dir` が共通ディレクトリへフォールバック)へ
+    // 直接インストールする。以前はサーバーごとに専用の隔離フォルダ
+    // (`server-profiles/<id>`)を割り当てていたが、公式ランチャー側からMod・
+    // リソースパックが全く見えなくなる問題があったため廃止した。同一フォルダを複数の
+    // TRAiNサーバーが共有することになるため、下記の「管理ファイル一覧による整理」で
+    // 他サーバー用ファイルとの混在を防ぐ。
+    let profile_id = format!("train-{server_id}");
     // 既存プロファイルがあれば、servers.dat上の同一エントリを判別するために前回登録した
-    // アドレス・options.txt上で既に自動有効化済みのリソースパック一覧を引き継ぐ
-    // (新規プロファイル作成時はどちらも空)。
-    let previous_profile =
-        train_launcher_core::profile::get_profile(&format!("train-{server_id}")).ok();
+    // アドレス・options.txt上で既に自動有効化済みのリソースパック一覧・前回インストールした
+    // 管理ファイル一覧を引き継ぐ(新規プロファイル作成時はいずれも空)。
+    let previous_profile = train_launcher_core::profile::get_profile(&profile_id).ok();
     let mut profile = Profile {
-        id: format!("train-{server_id}"),
+        id: profile_id.clone(),
         name: server_name,
         minecraft_version: server_config.minecraft_version.clone(),
         mod_loader: server_config.mod_loader.clone(),
@@ -937,7 +1074,7 @@ async fn join_train_server(
         // 常に最新の安定版を自動選択する。
         mod_loader_version: None,
         server_id: Some(server_id),
-        game_dir: Some(game_dir),
+        game_dir: None,
         java_path: None,
         max_memory_mb: None,
         source: ProfileSource::Train,
@@ -946,7 +1083,15 @@ async fn join_train_server(
             .as_ref()
             .and_then(|profile| profile.last_server_address.clone()),
         enabled_resource_packs: previous_profile
-            .map(|profile| profile.enabled_resource_packs)
+            .as_ref()
+            .map(|profile| profile.enabled_resource_packs.clone())
+            .unwrap_or_default(),
+        managed_mod_filenames: previous_profile
+            .as_ref()
+            .map(|profile| profile.managed_mod_filenames.clone())
+            .unwrap_or_default(),
+        managed_resource_pack_filenames: previous_profile
+            .map(|profile| profile.managed_resource_pack_filenames)
             .unwrap_or_default(),
     };
     match train_launcher_core::profile::create_profile(profile.clone()) {
@@ -960,6 +1105,74 @@ async fn join_train_server(
 
     let profile_game_dir = profile.effective_game_dir(&minecraft_root());
 
+    // 共有フォルダを使う他のTRAiNプロファイル(=以前参加した別サーバー)が配置した
+    // Mod・リソースパックのうち、今回のサーバー設定で不要なものを削除する。
+    // このプロファイル自身についても、サーバー側でMod構成が変更され今回のURL一覧に
+    // 含まれなくなったファイルがあれば同様に削除する。判定は「管理ファイル一覧
+    // (`managed_mod_filenames`/`managed_resource_pack_filenames`)に記録されているか」
+    // のみで行うため、ユーザーが手動で追加したMod・独自の`game_dir`を指定している
+    // プロファイルのファイルには一切触れない。
+    {
+        let keep_mod_filenames: std::collections::HashSet<String> = server_config
+            .mod_urls
+            .iter()
+            .map(|url| resolved_file_from_direct_url(url).filename)
+            .collect();
+        let keep_resource_pack_filenames: std::collections::HashSet<String> = server_config
+            .resource_pack_urls
+            .iter()
+            .map(|url| resolved_file_from_direct_url(url).filename)
+            .collect();
+        let empty_keep_set: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mods_dir = profile_game_dir.join("mods");
+        let resourcepacks_dir = profile_game_dir.join("resourcepacks");
+
+        match train_launcher_core::profile::list_profiles() {
+            Ok(all_profiles) => {
+                for mut other in all_profiles {
+                    if other.source != ProfileSource::Train {
+                        continue;
+                    }
+                    let uses_shared_dir = other
+                        .game_dir
+                        .as_deref()
+                        .map(str::trim)
+                        .map(str::is_empty)
+                        .unwrap_or(true);
+                    if !uses_shared_dir {
+                        continue;
+                    }
+                    let (keep_mods, keep_packs) = if other.id == profile.id {
+                        (&keep_mod_filenames, &keep_resource_pack_filenames)
+                    } else {
+                        (&empty_keep_set, &empty_keep_set)
+                    };
+                    let pruned_mods =
+                        prune_stale_managed_files(&other.managed_mod_filenames, keep_mods, &mods_dir)
+                            .await;
+                    let pruned_packs = prune_stale_managed_files(
+                        &other.managed_resource_pack_filenames,
+                        keep_packs,
+                        &resourcepacks_dir,
+                    )
+                    .await;
+                    if pruned_mods.len() != other.managed_mod_filenames.len()
+                        || pruned_packs.len() != other.managed_resource_pack_filenames.len()
+                    {
+                        other.managed_mod_filenames = pruned_mods;
+                        other.managed_resource_pack_filenames = pruned_packs;
+                        if let Err(err) = train_launcher_core::profile::update_profile(other) {
+                            eprintln!("failed to persist pruned managed files: {err}");
+                        }
+                    }
+                }
+            }
+            Err(err) => {
+                eprintln!("failed to list profiles for shared folder cleanup: {err}");
+            }
+        }
+    }
+
     // TRAiNサーバー設定のmod_urls/resource_pack_urlsは、TRAiN側で既にバージョン適合・
     // 再配布可否の確認を終えた直接ダウンロードURL(Modrinth/CurseForgeのプロジェクトページ
     // URLではない)。resolve_dependencies()/resource_pack::install_from_url()へ渡すと
@@ -970,6 +1183,12 @@ async fn join_train_server(
     // 失敗したファイルのみスキップして続行し、失敗一覧を戻り値として呼び出し側へ返す。
     let mut download_warnings: Vec<String> = Vec::new();
     let mut installed_resource_pack_filenames: Vec<String> = Vec::new();
+    // 実際にディスク上へ配置できた(=このプロファイルが引き続き「管理している」と
+    // 見なせる)ファイル名一覧。ダウンロードに失敗しても、以前のダウンロードで既に
+    // ファイルが存在していれば管理対象として引き続き扱う(次回参加時に誤って
+    // 「他プロファイルのファイル」として削除されないようにするため)。
+    let mut managed_mod_filenames: Vec<String> = Vec::new();
+    let mut managed_resource_pack_filenames: Vec<String> = Vec::new();
 
     if !server_config.mod_urls.is_empty() {
         let dest_dir = profile_game_dir.join("mods");
@@ -991,6 +1210,9 @@ async fn join_train_server(
             );
             if let Err(err) = download_resolved_file(&resolved, &dest_dir).await {
                 download_warnings.push(format!("Mod「{}」: {err}", resolved.filename));
+            }
+            if dest_dir.join(&resolved.filename).exists() {
+                managed_mod_filenames.push(resolved.filename);
             }
         }
     }
@@ -1014,9 +1236,12 @@ async fn join_train_server(
                 },
             );
             match download_resolved_file(&resolved, &dest_dir).await {
-                Ok(_) => installed_resource_pack_filenames.push(resolved.filename),
+                Ok(_) => installed_resource_pack_filenames.push(resolved.filename.clone()),
                 Err(err) => download_warnings
                     .push(format!("リソースパック「{}」: {err}", resolved.filename)),
+            }
+            if dest_dir.join(&resolved.filename).exists() {
+                managed_resource_pack_filenames.push(resolved.filename);
             }
         }
     }
@@ -1063,6 +1288,12 @@ async fn join_train_server(
         }
     }
 
+    // 次回このサーバーへ再参加する際に、他プロファイルとの整理(上記の「共有フォルダの
+    // 整理」処理)や「初期化」機能([`reset_server_profile_mods`])で使う管理ファイル
+    // 一覧を更新する。
+    profile.managed_mod_filenames = managed_mod_filenames;
+    profile.managed_resource_pack_filenames = managed_resource_pack_filenames;
+
     // servers.dat/options.txtへ反映した内容(last_server_address/enabled_resource_packs)を
     // 次回起動時にも引き継げるよう保存する。失敗しても起動自体は継続する。
     if let Err(err) = train_launcher_core::profile::update_profile(profile.clone()) {
@@ -1076,19 +1307,54 @@ async fn join_train_server(
 /// TRAiNサーバー専用プロファイルの導入済みMod・リソースパックを削除する(「初期化」用)。
 ///
 /// ダウンロード済みファイルが壊れている/中途半端な更新で不整合が起きた場合の復旧手段。
-/// ワールドデータ・設定ファイル(`saves`/`options.txt`等)には触れず、`mods`/
-/// `resourcepacks` ディレクトリの中身のみを削除する。まだ一度も参加していないサーバー
-/// (プロファイル未作成)の場合は何もせず正常終了する。次回「起動」を押すと
+/// ワールドデータ・設定ファイル(`saves`/`options.txt`等)には触れない。まだ一度も参加して
+/// いないサーバー(プロファイル未作成)の場合は何もせず正常終了する。次回「起動」を押すと
 /// `join_train_server` が全ファイルを再ダウンロードする。
+///
+/// 公式Minecraft Launcherと共有するフォルダ(既定)の場合は、他プロファイルのMod・
+/// ユーザーが手動で追加したMod・リソースパックには一切触れないよう、このプロファイルの
+/// 管理ファイル一覧([`train_launcher_core::profile::Profile::managed_mod_filenames`]/
+/// `managed_resource_pack_filenames`)に記録済みのファイルのみを削除する。旧バージョンで
+/// 作成された、このプロファイル専用の隔離フォルダ(`game_dir` が明示的に設定されている
+/// 場合)であれば、従来通り `mods`/`resourcepacks` の中身を丸ごと削除する。
 #[tauri::command]
 async fn reset_server_profile_mods(server_id: String) -> Result<(), String> {
     let profile_id = format!("train-{server_id}");
-    let profile = match train_launcher_core::profile::get_profile(&profile_id) {
+    let mut profile = match train_launcher_core::profile::get_profile(&profile_id) {
         Ok(profile) => profile,
         Err(train_launcher_core::CoreError::ProfileNotFound(_)) => return Ok(()),
         Err(err) => return Err(err.to_string()),
     };
     let game_dir = profile.effective_game_dir(&minecraft_root());
+    let uses_shared_dir = profile
+        .game_dir
+        .as_deref()
+        .map(str::trim)
+        .map(str::is_empty)
+        .unwrap_or(true);
+
+    if uses_shared_dir {
+        for filename in profile.managed_mod_filenames.drain(..) {
+            let path = game_dir.join("mods").join(&filename);
+            if path.exists() {
+                tokio::fs::remove_file(&path)
+                    .await
+                    .map_err(|err| err.to_string())?;
+            }
+        }
+        for filename in profile.managed_resource_pack_filenames.drain(..) {
+            let path = game_dir.join("resourcepacks").join(&filename);
+            if path.exists() {
+                tokio::fs::remove_file(&path)
+                    .await
+                    .map_err(|err| err.to_string())?;
+            }
+        }
+        if let Err(err) = train_launcher_core::profile::update_profile(profile) {
+            eprintln!("failed to persist cleared managed files: {err}");
+        }
+        return Ok(());
+    }
 
     for sub_dir in ["mods", "resourcepacks"] {
         let dir = game_dir.join(sub_dir);

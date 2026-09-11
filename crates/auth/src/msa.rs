@@ -16,7 +16,7 @@
 use oauth2::basic::BasicClient;
 use oauth2::{
     AuthUrl, AuthorizationCode, ClientId, CsrfToken, PkceCodeChallenge, PkceCodeVerifier,
-    RedirectUrl, Scope, TokenResponse, TokenUrl,
+    RedirectUrl, RefreshToken, Scope, TokenResponse, TokenUrl,
 };
 
 use crate::AuthError;
@@ -120,6 +120,49 @@ pub async fn exchange_authorization_code(
     Ok(MsaToken {
         access_token: token.access_token().secret().to_string(),
         refresh_token: token.refresh_token().map(|t| t.secret().to_string()),
+        expires_at,
+    })
+}
+
+/// 保存済みの `refresh_token` を使ってMicrosoftアクセストークンを再取得する。
+///
+/// MSAのアクセストークンは短命(数十分〜1時間程度)なため、サインイン時に一度だけ
+/// 取得したものを使い続けることはできない。起動のたびに本関数で新しいアクセストークンへ
+/// 交換し、それを [`crate::xbox::exchange_microsoft_token`] へ渡してMinecraftトークンを
+/// 再取得する(公式ランチャーと同様、埋め込みWebViewでの再サインインなしに毎回の起動を
+/// 成功させるための処理)。
+///
+/// Microsoft側は原則としてリフレッシュのたびに新しい `refresh_token` を発行し、古いものは
+/// 無効化する(リフレッシュトークンローテーション)。返却値の `refresh_token` を都度
+/// 保存し直す必要がある(応答に含まれない場合は渡した値をそのまま引き継ぐ)。
+pub async fn refresh_access_token(
+    config: &crate::config::MicrosoftConfig,
+    refresh_token: &str,
+) -> Result<MsaToken, AuthError> {
+    let client = BasicClient::new(ClientId::new(config.client_id.clone()))
+        .set_auth_uri(AuthUrl::new(MSA_AUTH_URL.to_string()).expect("static URL is valid"))
+        .set_token_uri(TokenUrl::new(MSA_TOKEN_URL.to_string()).expect("static URL is valid"));
+    let http_client = oauth2::reqwest::Client::new();
+
+    let token = client
+        .exchange_refresh_token(&RefreshToken::new(refresh_token.to_string()))
+        .request_async(&http_client)
+        .await
+        .map_err(|err| AuthError::Oauth(err.to_string()))?;
+
+    let expires_at = token.expires_in().map(|duration| {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        (now + duration).as_secs() as i64
+    });
+
+    Ok(MsaToken {
+        access_token: token.access_token().secret().to_string(),
+        refresh_token: token
+            .refresh_token()
+            .map(|t| t.secret().to_string())
+            .or_else(|| Some(refresh_token.to_string())),
         expires_at,
     })
 }

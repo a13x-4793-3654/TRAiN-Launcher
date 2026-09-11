@@ -22,6 +22,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { ServerDetailPage } from "./ServerDetail";
 import { AccountLinkNoticeModal } from "./AccountLinkNoticeModal";
+import { TestModeNoticeModal } from "./TestModeNoticeModal";
 import { useLaunchStatus } from "../LaunchStatus";
 
 const TOASTER_ID = "servers-toaster";
@@ -40,6 +41,7 @@ interface MemberServer {
 
 interface ServerConfig {
   linked: boolean | null;
+  test_mode: boolean | null;
 }
 
 interface GameExitedPayload {
@@ -93,6 +95,15 @@ const useStyles = makeStyles({
  * 同意後に `link_train_account` でDiscord↔Minecraftアカウントの紐づけを完了して
  * から起動処理(`proceedJoin`)へ進む。既に紐づけ済み、またはTRAiN側が未対応で
  * 判定不能(`linked` が `true`/`null`)の場合は、従来どおり即座に起動する。
+ *
+ * 同様に `test_mode` が `true`(=サーバーが試験モード中で、かつこのDiscordアカウントが
+ * Administrator権限を持っているため、TRAiN側が本番ではなく試験用のMod/リソースパック
+ * 構成を返している)の場合は、`TestModeNoticeModal` で試験モードである旨を通知し、
+ * 「起動する」を押してから `proceedJoin` へ進む(未紐づけかつ試験モードの場合は、
+ * 紐づけ完了後に試験モード通知を表示する)。`test_mode` が `false`/`null` の場合は
+ * 通常どおり通知なしで起動する。試験用Mod/リソースパックの取得自体は
+ * `join_train_server` が改めて `get_server_config` を呼ぶため、ここで取得した内容が
+ * そのまま使われる(ランチャー側で構成を切り替えるロジックは不要)。
  */
 export function ServersPage() {
   const styles = useStyles();
@@ -121,6 +132,13 @@ export function ServersPage() {
   );
   const [linking, setLinking] = useState(false);
   const [linkError, setLinkError] = useState<string | null>(null);
+  // 紐づけ確認後に試験モード通知も必要かどうか(紐づけ完了時に参照する)。
+  const [pendingTestMode, setPendingTestMode] = useState(false);
+
+  // 試験モード(`test_mode: true`)を検出した場合に表示する通知モーダルの対象サーバー。
+  // `null` の間はモーダルを表示しない。
+  const [testModeNoticeServer, setTestModeNoticeServer] =
+    useState<MemberServer | null>(null);
 
   useEffect(() => {
     setAuthLoading(true);
@@ -229,6 +247,9 @@ export function ServersPage() {
    * 同意・紐づけ完了を待ってから実際の参加処理(`proceedJoin`)へ進む。
    * 既に紐づけ済み、またはTRAiN側が未対応で判定できない場合は、従来どおり
    * 即座に参加処理を開始する(判定不能な場合に誤って毎回モーダルを出さないため)。
+   *
+   * さらに `test_mode` が `true` の場合は、紐づけ確認(必要な場合)の後、実際の起動前に
+   * 試験モード通知モーダルを表示する。
    */
   const handleJoin = (server: MemberServer) => {
     setLaunchingId(server.id);
@@ -236,7 +257,12 @@ export function ServersPage() {
       .then((config) => {
         if (config.linked === false) {
           setLinkError(null);
+          setPendingTestMode(config.test_mode === true);
           setLinkNoticeServer(server);
+          return;
+        }
+        if (config.test_mode === true) {
+          setTestModeNoticeServer(server);
           return;
         }
         proceedJoin(server);
@@ -264,7 +290,11 @@ export function ServersPage() {
       .then(() => {
         setLinking(false);
         setLinkNoticeServer(null);
-        proceedJoin(server);
+        if (pendingTestMode) {
+          setTestModeNoticeServer(server);
+        } else {
+          proceedJoin(server);
+        }
       })
       .catch((err) => {
         setLinking(false);
@@ -275,6 +305,21 @@ export function ServersPage() {
   const handleLinkCancel = () => {
     setLinkNoticeServer(null);
     setLinkError(null);
+    setPendingTestMode(false);
+    setLaunchingId(null);
+  };
+
+  const handleTestModeConfirm = () => {
+    if (!testModeNoticeServer) {
+      return;
+    }
+    const server = testModeNoticeServer;
+    setTestModeNoticeServer(null);
+    proceedJoin(server);
+  };
+
+  const handleTestModeCancel = () => {
+    setTestModeNoticeServer(null);
     setLaunchingId(null);
   };
 
@@ -376,6 +421,13 @@ export function ServersPage() {
         error={linkError}
         onAgree={handleLinkAgree}
         onCancel={handleLinkCancel}
+      />
+
+      <TestModeNoticeModal
+        open={testModeNoticeServer !== null}
+        serverName={testModeNoticeServer?.name ?? ""}
+        onConfirm={handleTestModeConfirm}
+        onCancel={handleTestModeCancel}
       />
 
       <Toaster toasterId={TOASTER_ID} />

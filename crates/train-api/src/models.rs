@@ -28,6 +28,14 @@ pub struct ServerConfig {
     /// ようにするため、判定できない場合は「紐づけ済み」寄りに倒す)。
     #[serde(default)]
     pub linked: Option<bool>,
+    /// このサーバーが「試験モード」中で、かつこのBearerトークンの持ち主がそのDiscordギルドで
+    /// Administrator権限を持っているため、`mod_urls`/`resource_pack_urls`(および
+    /// `minecraft_version`/`mod_loader`)が本番構成ではなく試験用構成になっているか。
+    ///
+    /// `true` の場合、ランチャーは起動前に試験モードである旨をモーダルで通知すること。
+    /// TRAiN側の対応前は未実装のため欠落しうる(その場合 `None`、本番構成として扱う)。
+    #[serde(default)]
+    pub test_mode: Option<bool>,
 }
 
 /// [`TrainApiClient::link_account`] のリクエスト本体。

@@ -159,6 +159,8 @@ impl TrainApiClient for MockTrainApiClient {
             // モック環境では実サーバーが存在しないため紐づけ状態を判定できない。
             // 初回参加時の注意事項モーダルをUI上で確認できるよう、常に未紐づけ扱いにする。
             linked: Some(false),
+            // 同様に、試験モード通知モーダルをUI上で確認できるよう、常に試験モード扱いにする。
+            test_mode: Some(true),
         })
     }
 

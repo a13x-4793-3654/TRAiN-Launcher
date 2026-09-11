@@ -41,6 +41,7 @@ interface ServerConfig {
   mod_urls: string[];
   resource_pack_urls: string[];
   linked: boolean | null;
+  test_mode: boolean | null;
 }
 
 interface LaunchProgressPayload {
@@ -237,6 +238,14 @@ export function ServerDetailPage(props: {
                     : "不明"}
               </Text>
             </Field>
+            {config.test_mode === true && (
+              <MessageBar intent="warning">
+                <MessageBarBody>
+                  試験モードが有効です。Administrator権限を持つあなたが「起動」すると、
+                  本番ではなく試験用に構成されたMod/リソースパックが導入されます。
+                </MessageBarBody>
+              </MessageBar>
+            )}
           </div>
 
           <div className={styles.section}>

@@ -712,14 +712,14 @@ export function ProfilesPage() {
               </Field>
               <Field
                 label="Javaパス(任意)"
-                hint="未指定の場合はPATH上のjavaを使用します"
+                hint="対応するJavaを優先指定できます。未指定・非対応の場合は既定設定やインストール済みJavaから選択し、見つからなければ自動ダウンロードします"
               >
                 <Input
                   value={form.javaPath}
                   onChange={(_event, data) =>
                     setForm((f) => ({ ...f, javaPath: data.value }))
                   }
-                  placeholder="例: C:\Program Files\Java\jdk-17\bin\java.exe"
+                  placeholder="自動選択 (例: C:\Program Files\Java\jdk-21\bin\java.exe)"
                 />
               </Field>
               <Field
@@ -801,4 +801,3 @@ export function ProfilesPage() {
     </div>
   );
 }
-

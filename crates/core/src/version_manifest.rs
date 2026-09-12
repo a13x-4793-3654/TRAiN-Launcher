@@ -448,3 +448,30 @@ fn resolve_version_with_manifest<'a>(
         }
     })
 }
+
+#[cfg(test)]
+mod java_requirement_tests {
+    use super::*;
+
+    #[test]
+    fn mod_loader_inherits_or_overrides_the_parent_java_requirement() {
+        let parent: VersionDetails = serde_json::from_value(serde_json::json!({
+            "id": "1.21.1", "type": "release", "mainClass": "Vanilla",
+            "assetIndex": {"id": "test", "sha1": "", "size": 0, "url": ""},
+            "assets": "test", "downloads": {"client": {"sha1": "", "size": 0, "url": ""}},
+            "javaVersion": {"component": "java-runtime-delta", "majorVersion": 21}
+        })).unwrap();
+        let mut child: PartialVersionDetails = serde_json::from_value(serde_json::json!({
+            "id": "fabric-loader-test-1.21.1",
+            "inheritsFrom": "1.21.1", "mainClass": "KnotClient"
+        })).unwrap();
+        let merged = merge_with_parent(child.clone(), parent.clone());
+        assert_eq!(crate::java::required_major_version(&merged).unwrap(), 21);
+        child.java_version = Some(JavaVersion {
+            component: "future-runtime".to_string(),
+            major_version: 25,
+        });
+        let merged = merge_with_parent(child, parent);
+        assert_eq!(crate::java::required_major_version(&merged).unwrap(), 25);
+    }
+}

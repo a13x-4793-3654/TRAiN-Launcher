@@ -842,13 +842,14 @@ async fn launch_profile(
     profile: train_launcher_core::profile::Profile,
 ) -> Result<(), String> {
     let mut profile = profile;
-    if profile.java_path.is_none() {
-        // プロファイルにJavaパスの指定が無い場合、設定画面で指定された既定のJavaパスを使う
-        // (それも未指定ならPATH上の `java` を使う、という解決順は `launch::build_launch_command`
-        // 側で行う)。
-        let settings = train_launcher_core::settings::load_settings().unwrap_or_default();
-        profile.java_path = settings.java_path;
-    }
+    let settings = train_launcher_core::settings::load_settings()
+        .map_err(|err| format!("Javaの起動設定を読み込めませんでした: {err}"))?;
+    let preferred_java_paths: Vec<String> = profile
+        .java_path
+        .iter()
+        .chain(settings.java_path.iter())
+        .cloned()
+        .collect();
 
     let token = ensure_valid_microsoft_token().await?;
     let uuid = token.uuid.clone().ok_or_else(|| {
@@ -863,11 +864,42 @@ async fn launch_profile(
     // 公式Minecraft Launcherと同じ `.minecraft` 相当のディレクトリを共有する
     // (二重ダウンロードを避け、どちらのランチャーからでも同じファイルを再利用できるようにする)。
     let launcher_root = minecraft_root();
+    let paths = train_launcher_core::paths::LauncherPaths::new(&launcher_root);
+    let java_progress = |message: &str| {
+        if let Err(err) = app_handle.emit(
+            LAUNCH_PROGRESS_EVENT,
+            LaunchProgressPayload {
+                phase: "preparing_java",
+                phase_label: message.to_string(),
+                completed: 0,
+                total: 0,
+            },
+        ) {
+            eprintln!("failed to emit Java progress event: {err}");
+        }
+    };
+    java_progress("必要なJavaバージョンを確認中...");
+    let base_version = train_launcher_core::version_manifest::resolve_version(
+        &profile.minecraft_version,
+        &paths,
+    )
+    .await
+    .map_err(|err| err.to_string())?;
+    let required_java = train_launcher_core::java::required_major_version(&base_version.details)
+        .map_err(|err| err.to_string())?;
+    let mut java = train_launcher_core::java::ensure_runtime(
+        required_java,
+        &preferred_java_paths,
+        &launcher_root,
+        &java_progress,
+    )
+    .await
+    .map_err(|err| err.to_string())?;
 
     // Modローダーが指定されている場合、`minecraft_version`(バニラ)を基準にローダーを
     // 自動導入し、以降のダウンロード/起動には導入後のバージョンID(例:
     // `fabric-loader-0.19.5-1.20.4`)を使う。未導入の場合のみ実際のインストールが走る。
-    let game_version = if let Some(loader_name) = profile.mod_loader.clone() {
+    let resolved_version = if let Some(loader_name) = profile.mod_loader.clone() {
         let loader_kind = train_launcher_core::mod_loader::ModLoaderKind::parse(&loader_name)
             .ok_or_else(|| format!("未対応のModローダーです: {loader_name}"))?;
 
@@ -881,22 +913,37 @@ async fn launch_profile(
             },
         );
 
-        let installer_java_path = profile
-            .java_path
-            .clone()
-            .unwrap_or_else(|| "java".to_string());
-        train_launcher_core::mod_loader::ensure_mod_loader_installed(
+        let game_version = train_launcher_core::mod_loader::ensure_mod_loader_installed(
             loader_kind,
-            &profile.minecraft_version,
+            &base_version.id,
             profile.mod_loader_version.as_deref(),
             &launcher_root,
-            &installer_java_path,
+            &java.executable.to_string_lossy(),
         )
         .await
-        .map_err(|err| err.to_string())?
+        .map_err(|err| err.to_string())?;
+        train_launcher_core::version_manifest::resolve_version(&game_version, &paths)
+            .await
+            .map_err(|err| err.to_string())?
     } else {
-        profile.minecraft_version.clone()
+        base_version
     };
+
+    let final_required_java =
+        train_launcher_core::java::required_major_version(&resolved_version.details)
+            .map_err(|err| err.to_string())?;
+    if final_required_java != required_java {
+        java = train_launcher_core::java::ensure_runtime(
+            final_required_java,
+            &preferred_java_paths,
+            &launcher_root,
+            &java_progress,
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+    }
+    // 自動選択結果はこの起動だけに適用し、保存済みのユーザー設定は上書きしない。
+    profile.java_path = Some(java.executable.to_string_lossy().into_owned());
 
     let progress_handle = app_handle.clone();
     let on_progress: train_launcher_core::download::ProgressCallback =
@@ -907,8 +954,8 @@ async fn launch_profile(
             }
         });
 
-    let resolved_version = train_launcher_core::download::download_version_files(
-        &game_version,
+    let resolved_version = train_launcher_core::download::download_resolved_version_files(
+        resolved_version,
         &launcher_root,
         on_progress,
     )
@@ -919,7 +966,11 @@ async fn launch_profile(
         LAUNCH_PROGRESS_EVENT,
         LaunchProgressPayload {
             phase: "launching",
-            phase_label: "起動中...".to_string(),
+            phase_label: format!(
+                "Java {} で起動中... ({})",
+                java.major_version,
+                java.executable.display()
+            ),
             completed: 0,
             total: 0,
         },
@@ -1121,7 +1172,9 @@ async fn join_train_server(
         game_dir: previous_profile
             .as_ref()
             .and_then(|profile| profile.game_dir.clone()),
-        java_path: None,
+        java_path: previous_profile
+            .as_ref()
+            .and_then(|profile| profile.java_path.clone()),
         max_memory_mb: None,
         source: ProfileSource::Train,
         last_launched_at: None,

@@ -16,6 +16,8 @@ TRAiN Launcher は、TRAiN 管理下のサーバーに参加しているユー�
 
 ### プロファイル / Mod 管理
 
+- 起動時に Minecraft のバージョン情報から必要な Java を判定し、自動選択する。必要条件(メジャーバージョンの下限・CPUアーキテクチャ)を満たすプロファイル個別設定、既定設定の順に優先し、未指定・非対応の場合は `JAVA_HOME`、`PATH`、OSごとの標準インストール先、公式 Minecraft Launcher のランタイム、TRAiN Launcher が取得済みのランタイムから検索する。自動選択では古い Minecraft と新しすぎる Java の非互換を避けるため、要求メジャーバージョンに一致するものを使う
+- 対応する Java が見つからない場合は Eclipse Adoptium の Temurin JRE を自動ダウンロードし、SHA-256・サイズ・実際のバージョンとアーキテクチャを検証してから使用する。保存先はランチャー設定ディレクトリ配下の `runtimes/installed` (Windows: `%APPDATA%\train-launcher\runtimes\installed`)で、次回以降は再利用する。システムの Java、`PATH`、保存済みの Java パス設定は変更しない。初回取得にはインターネット接続が必要で、取得失敗や対象環境向けの配布がない場合は理由を表示して起動を中止する
 - **Fabric / Quilt / Forge / NeoForge** の前提Modローダーをプロファイルの設定だけで自動導入(未導入の場合のみ実行され、既に導入済みなら再導入はしない)
   - Fabric / Quilt は公式Meta APIから完全なバージョン情報を取得して導入
   - Forge / NeoForge は公式インストーラjarをダウンロードし、ヘッドレスモードで実行して導入(GUIは表示されない)
@@ -142,7 +144,8 @@ frontend/          # React + Vite + TypeScript + Fluent UI React v9 (`@fluentui/
 ### 補足
 
 - MSA/Discord 認証フロー(`crates/auth`)、Minecraft本体の起動処理(`crates/core`、Fabric/Quilt/Forge/NeoForgeの自動導入込み)、Mod 依存解決・ダウンロード(`crates/mods`)は実装済みです。TRAiN 独自APIもエンドポイント形式・認証方式が確定済みで実装済みです(`TRAIN_LAUNCHER_API_BASE_URL` 参照)。ただし、サーバー管理者が `minecraft-mods manifest`(または `apply`)を一度もTRAiN Link経由で送っていないサーバーは設定未登録として扱われ、参加はできません
-- Forge/NeoForge の自動導入にはインストーラjarの実行に Java (JRE/JDK) が必要です。設定画面またはプロファイルで指定したJavaパス(未指定時はPATH上の `java`)が使われます
+- Forge/NeoForge のインストーラjarにも、Minecraftの必要バージョンに基づいて自動選択・取得した Java を使用します。所属サーバーから再度起動しても、プロファイル個別の Java パス設定は保持されます
+- 起動中はJavaの検索・取得状況と選択した実行ファイルを表示し、実際に使用したJavaのバージョン・アーキテクチャ・パスを各プロファイルの `train-launcher-process.log` の先頭に記録します
 - Windows で `cargo build` 時に MSVC ヘッダ(`vcruntime.h` 等)が見つからないエラーが出る場合は、Visual Studio Installer で「C++ によるデスクトップ開発」ワークロードが正しくインストールされているか確認してください
 
 ## リリース手順(メンテナー向け)

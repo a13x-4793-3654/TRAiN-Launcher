@@ -4,6 +4,8 @@
 //! 起動コマンドの構築を担当するコアクレート。
 
 pub mod download;
+pub mod java;
+mod java_download;
 pub mod launch;
 pub mod launcher_profiles;
 pub mod maven;
@@ -48,6 +50,10 @@ mod error {
         InvalidLibraryName(String),
         #[error("invalid launch command: {0}")]
         InvalidLaunchCommand(String),
+        #[error("{0}")]
+        JavaRuntime(String),
+        #[error("{0}")]
+        JavaNotFound(String),
         #[error("profile not found: {0}")]
         ProfileNotFound(String),
         #[error("profile already exists: {0}")]

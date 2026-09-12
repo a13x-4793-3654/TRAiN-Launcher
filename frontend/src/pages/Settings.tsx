@@ -315,13 +315,13 @@ export function SettingsPage() {
           起動設定
         </Title3>
         <Body1 as="p" block>
-          プロファイル個別に指定がない場合の既定値です。プロファイル側の設定がある場合はそちらが優先されます。
+          プロファイル個別に対応するJavaの指定がない場合の既定値です。未指定・非対応の場合は必要なJavaを自動検索し、見つからなければ自動ダウンロードします。
         </Body1>
 
         <div className={styles.form}>
           <Field
             label={
-              <InfoLabel info="未指定の場合はPATH上のjavaを使用します">
+              <InfoLabel info="Minecraftが必要とするバージョン・アーキテクチャに対応する場合に優先します。未指定・非対応の場合はインストール済みJavaを自動検索し、見つからなければランチャー専用フォルダーへ取得します">
                 既定のJavaパス(任意)
               </InfoLabel>
             }
@@ -331,7 +331,7 @@ export function SettingsPage() {
                 className={styles.pathInput}
                 value={javaPath}
                 onChange={(_event, data) => setJavaPath(data.value)}
-                placeholder="例: C:\Program Files\Java\jdk-17\bin\java.exe"
+                placeholder="自動選択 (例: C:\Program Files\Java\jdk-21\bin\java.exe)"
                 disabled={loading}
               />
               <Button

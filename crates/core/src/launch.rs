@@ -200,7 +200,24 @@ pub async fn launch(
     game_dir: &Path,
     auth: &LaunchAuth,
 ) -> Result<Child, CoreError> {
-    let command = build_launch_command(profile, resolved_version, launcher_root, game_dir, auth)?;
+    let required_java = crate::java::required_major_version(&resolved_version.details)?;
+    let preferred: Vec<String> = profile.java_path.iter().cloned().collect();
+    let java = crate::java::ensure_runtime(
+        required_java,
+        &preferred,
+        launcher_root,
+        &|message| eprintln!("{message}"),
+    )
+    .await?;
+    let mut effective_profile = profile.clone();
+    effective_profile.java_path = Some(java.executable.to_string_lossy().into_owned());
+    let command = build_launch_command(
+        &effective_profile,
+        resolved_version,
+        launcher_root,
+        game_dir,
+        auth,
+    )?;
     let (program, args) = command
         .split_first()
         .ok_or_else(|| CoreError::InvalidLaunchCommand("launch command is empty".to_string()))?;
@@ -223,7 +240,18 @@ pub async fn launch(
     // `train-launcher-process.log`(game_dir直下)へ書き出す。
     let log_path = game_dir.join("train-launcher-process.log");
     if let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) {
-        tokio::spawn(relay_process_output_to_log(stdout, stderr, log_path));
+        let java_description = format!(
+            "Java {} ({}): {}\n",
+            java.major_version,
+            java.architecture,
+            java.executable.display()
+        );
+        tokio::spawn(relay_process_output_to_log(
+            stdout,
+            stderr,
+            log_path,
+            java_description,
+        ));
     }
 
     Ok(child)
@@ -235,8 +263,9 @@ async fn relay_process_output_to_log(
     stdout: ChildStdout,
     stderr: ChildStderr,
     log_path: PathBuf,
+    java_description: String,
 ) {
-    let file = match tokio::fs::File::create(&log_path).await {
+    let mut file = match tokio::fs::File::create(&log_path).await {
         Ok(file) => file,
         Err(err) => {
             eprintln!(
@@ -246,6 +275,12 @@ async fn relay_process_output_to_log(
             return;
         }
     };
+    if let Err(err) = file.write_all(java_description.as_bytes()).await {
+        eprintln!(
+            "failed to write Java information to {}: {err}",
+            log_path.display()
+        );
+    }
     let file = std::sync::Arc::new(tokio::sync::Mutex::new(file));
 
     let stdout_file = file.clone();
@@ -270,4 +305,3 @@ async fn relay_process_output_to_log(
 
     tokio::join!(stdout_task, stderr_task);
 }
-

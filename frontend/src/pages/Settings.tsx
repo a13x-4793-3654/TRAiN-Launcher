@@ -9,6 +9,7 @@ import {
   InfoLabel,
   Button,
   Spinner,
+  ProgressBar,
   Toaster,
   useToastController,
   Toast,
@@ -17,9 +18,15 @@ import {
   makeStyles,
   tokens,
 } from "@fluentui/react-components";
-import { SaveRegular, FolderOpenRegular } from "@fluentui/react-icons";
+import {
+  SaveRegular,
+  FolderOpenRegular,
+  ArrowSyncRegular,
+} from "@fluentui/react-icons";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
+import { getVersion } from "@tauri-apps/api/app";
+import { useAppUpdate } from "../AppUpdate";
 
 const TOASTER_ID = "settings-toaster";
 
@@ -77,6 +84,13 @@ const useStyles = makeStyles({
     gap: tokens.spacingHorizontalS,
     marginTop: tokens.spacingVerticalS,
   },
+  updateProgressArea: {
+    display: "flex",
+    flexDirection: "column",
+    gap: tokens.spacingVerticalXXS,
+    maxWidth: "480px",
+    marginTop: tokens.spacingVerticalS,
+  },
 });
 
 /**
@@ -89,6 +103,14 @@ const useStyles = makeStyles({
 export function SettingsPage() {
   const styles = useStyles();
   const { dispatchToast } = useToastController(TOASTER_ID);
+  const {
+    status: updateStatus,
+    updateInfo,
+    progress: updateProgress,
+    error: updateError,
+    checkForUpdates,
+    installUpdate,
+  } = useAppUpdate();
 
   const [authStatus, setAuthStatus] = useState<AuthStatus>({
     discord_display_name: null,
@@ -101,6 +123,13 @@ export function SettingsPage() {
   const [gameDirectory, setGameDirectory] = useState("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [appVersion, setAppVersion] = useState<string | null>(null);
+
+  useEffect(() => {
+    getVersion()
+      .then(setAppVersion)
+      .catch((err) => console.error("failed to read app version", err));
+  }, []);
 
   const refreshAuthStatus = () => {
     invoke<AuthStatus>("get_auth_status")
@@ -351,6 +380,64 @@ export function SettingsPage() {
             </Button>
           </div>
         </div>
+      </div>
+
+      <div className={styles.section}>
+        <Title3 as="h3" block>
+          ランチャー本体
+        </Title3>
+        <Body1 as="p" block>
+          現在のバージョン: {appVersion ?? "取得中..."}
+        </Body1>
+
+        <div className={styles.actions}>
+          <Button
+            appearance="secondary"
+            icon={
+              updateStatus === "checking" ? (
+                <Spinner size="tiny" />
+              ) : (
+                <ArrowSyncRegular />
+              )
+            }
+            disabled={updateStatus === "checking" || updateStatus === "downloading"}
+            onClick={() => checkForUpdates()}
+          >
+            アップデートを確認
+          </Button>
+          {updateStatus === "available" && (
+            <Button appearance="primary" onClick={() => installUpdate()}>
+              今すぐアップデート(v{updateInfo?.version})
+            </Button>
+          )}
+        </div>
+
+        {updateStatus === "up-to-date" && (
+          <Caption1 as="p" block>
+            最新版です。
+          </Caption1>
+        )}
+        {updateStatus === "error" && (
+          <Caption1 as="p" block>
+            アップデートの確認に失敗しました: {updateError}
+          </Caption1>
+        )}
+        {(updateStatus === "downloading" || updateStatus === "installed") && (
+          <div className={styles.updateProgressArea}>
+            <ProgressBar
+              value={
+                updateProgress && updateProgress.contentLength
+                  ? updateProgress.downloaded / updateProgress.contentLength
+                  : undefined
+              }
+            />
+            <Caption1>
+              {updateStatus === "installed"
+                ? "インストールが完了しました。再起動しています..."
+                : "ダウンロード中..."}
+            </Caption1>
+          </div>
+        )}
       </div>
       <Toaster toasterId={TOASTER_ID} />
     </div>

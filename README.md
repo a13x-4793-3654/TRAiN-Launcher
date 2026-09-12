@@ -32,6 +32,13 @@ TRAiN Launcher は、TRAiN 管理下のサーバーに参加しているユー�
 - Discord サインインには Discord OAuth2 を利用
 - 認証フロー自体は `crates/auth` に実装済み(MSAはデバイスコードフロー、DiscordはPKCE付き認可コードフロー+ローカルループバックサーバでのリダイレクト受信)。取得したトークンはOSの資格情報ストア(Windows Credential Manager / macOS Keychain / Linux Secret Service)に保存される
 
+### 自動アップデート
+
+- `tauri-plugin-updater` を使用し、ランチャー起動直後に一度サイレントでアップデートの有無を確認する(見つからない場合・確認に失敗した場合もユーザーには通知しない)
+- アップデートが見つかった場合、画面上部(全タブ共通)にバナーを表示し、「今すぐアップデート」でダウンロード・インストール・再起動まで行う。「後で」を押すと、次回起動時まで再表示しない
+- 設定画面にも「ランチャー本体」セクションがあり、現在のバージョン表示・手動でのアップデート確認・適用が行える
+- 更新情報の配布元は GitHub Releases (`https://github.com/a13x-4793-3654/TRAiN-Launcher/releases/latest/download/latest.json`)。配布物の署名検証用の公開鍵は `apps/desktop/tauri.conf.json` の `plugins.updater.pubkey` に埋め込み済み。リリースの作成・署名は `.github/workflows/release.yml` が自動で行う(詳細は本README末尾の「リリース手順」を参照)
+
 ## 開発環境セットアップ
 
 ### 前提条件
@@ -133,6 +140,24 @@ frontend/          # React + Vite + TypeScript + Fluent UI React v9 (`@fluentui/
 - MSA/Discord 認証フロー(`crates/auth`)、Minecraft本体の起動処理(`crates/core`、Fabric/Quilt/Forge/NeoForgeの自動導入込み)、Mod 依存解決・ダウンロード(`crates/mods`)は実装済みです。TRAiN 独自APIもエンドポイント形式・認証方式が確定済みで実装済みです(`TRAIN_LAUNCHER_API_BASE_URL` 参照)。ただし、サーバー管理者が `minecraft-mods manifest`(または `apply`)を一度もTRAiN Link経由で送っていないサーバーは設定未登録として扱われ、参加はできません
 - Forge/NeoForge の自動導入にはインストーラjarの実行に Java (JRE/JDK) が必要です。設定画面またはプロファイルで指定したJavaパス(未指定時はPATH上の `java`)が使われます
 - Windows で `cargo build` 時に MSVC ヘッダ(`vcruntime.h` 等)が見つからないエラーが出る場合は、Visual Studio Installer で「C++ によるデスクトップ開発」ワークロードが正しくインストールされているか確認してください
+
+## リリース手順(メンテナー向け)
+
+ランチャー自体の自動アップデート機能(`tauri-plugin-updater`)は GitHub Releases を配布元としています。新バージョンを配布するには以下の手順を行ってください。
+
+1. **バージョン番号を更新する**: `apps/desktop/tauri.conf.json` の `version` と、`Cargo.toml` の `[workspace.package] version` を新しいバージョン(例: `0.2.0`)へ揃えて更新し、`main`(または開発ブランチ経由で)へマージする
+2. **タグを作成してpushする**:
+   ```powershell
+   git tag v0.2.0
+   git push origin v0.2.0
+   ```
+3. `.github/workflows/release.yml` が自動的にWindows/macOS(Intel・Apple Silicon)/Linux向けにビルド・署名を行い、**下書き(draft)状態のGitHub Release** を作成する(誤って未検証のビルドが配布されないよう、意図的に下書きにしている)
+4. GitHubの「Releases」画面で成果物とリリースノートを確認し、問題なければ **「Publish release」を押して公開する**。公開して初めて `https://github.com/a13x-4793-3654/TRAiN-Launcher/releases/latest/download/latest.json` が更新され、既存ユーザーのランチャーがアップデートを検知できるようになる
+
+### 事前準備(初回のみ・設定済み)
+
+- アップデート成果物の署名用キーペアを生成済み(`npm run tauri -- signer generate`)。公開鍵は `apps/desktop/tauri.conf.json` の `plugins.updater.pubkey` に埋め込み済み
+- 秘密鍵とパスワードは、このリポジトリの GitHub Actions Secrets (`TAURI_SIGNING_PRIVATE_KEY` / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`) に設定済み。**秘密鍵はリポジトリのどこにもコミットしておらず、ローテーションする場合は鍵を再生成のうえSecretsと`pubkey`を両方更新する必要がある**
 
 ## ステータス
 

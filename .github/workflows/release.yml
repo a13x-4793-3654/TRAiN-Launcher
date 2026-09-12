@@ -1,0 +1,80 @@
+name: Release
+
+# バージョンタグ (`v*`, 例: `v0.2.0`) をpushすると、Windows/macOS/Linux向けに
+# ビルド・署名(アップデーター用)を行い、GitHub Releaseへ成果物と`latest.json`を
+# アップロードする。作成されるリリースは`draft: true`(下書き)にしているため、
+# 内容を確認したうえで手動で「Publish release」を行うまでは一般公開されず、
+# アップデーター(`GET /releases/latest/download/latest.json`)からも参照されない。
+#
+# 事前準備:
+# - リポジトリの Settings > Secrets and variables > Actions に以下を設定済み:
+#   - `TAURI_SIGNING_PRIVATE_KEY` (アップデーター署名用秘密鍵。`npm run tauri -- signer generate`で生成)
+#   - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` (上記秘密鍵のパスワード)
+# - リリース前に `apps/desktop/tauri.conf.json` の `version` (と `Cargo.toml` の
+#   `workspace.package.version`) を新しいバージョンへ更新し、mainへマージしておくこと。
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  release:
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: "macos-latest" # Apple Silicon (M1以降)向け
+            args: "--target aarch64-apple-darwin"
+          - platform: "macos-latest" # Intel Mac向け
+            args: "--target x86_64-apple-darwin"
+          - platform: "ubuntu-22.04"
+            args: ""
+          - platform: "windows-latest"
+            args: ""
+
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      - name: Install system dependencies (Ubuntu only)
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - name: Install npm dependencies (workspace root)
+        run: npm ci
+
+      - name: Build and release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: apps/desktop
+          updaterJsonPreferNsis: true
+          tagName: ${{ github.ref_name }}
+          releaseName: "TRAiN Launcher ${{ github.ref_name }}"
+          releaseBody: "See the assets to download this version and install."
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.args }}

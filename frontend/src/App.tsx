@@ -31,6 +31,8 @@ import { ProfilesPage } from "./pages/Profiles";
 import { ModsPage } from "./pages/Mods";
 import { SettingsPage } from "./pages/Settings";
 import { LaunchStatusProvider, LaunchingModal } from "./LaunchStatus";
+import { AppUpdateProvider, useAppUpdate } from "./AppUpdate";
+import { UpdateBanner } from "./UpdateBanner";
 
 const TOASTER_ID = "train-launcher-toaster";
 
@@ -105,6 +107,7 @@ function AppShell() {
   const styles = useStyles();
   const [selected, setSelected] = useState<NavKey>("home");
   const { dispatchToast } = useToastController(TOASTER_ID);
+  const { checkForUpdates } = useAppUpdate();
 
   const [authStatus, setAuthStatus] = useState<AuthStatus>({
     discord_display_name: null,
@@ -122,6 +125,16 @@ function AppShell() {
   // 起動時に保存済みセッション(keyring)からサインイン状態を復元する。
   useEffect(() => {
     refreshAuthStatus();
+  }, []);
+
+  // 起動直後に一度だけランチャー自体のアップデートをサイレントに確認する。
+  // 見つかった場合は`UpdateBanner`に表示されるが、最新版でもエラーでも
+  // ここではトースト等は出さない(ユーザーの起動体験を妨げないため)。
+  useEffect(() => {
+    checkForUpdates().catch((err) =>
+      console.error("failed to check for launcher updates", err),
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const onTabSelect: SelectTabEventHandler = (_event, data) => {
@@ -224,6 +237,7 @@ function AppShell() {
           )}
         </div>
       </header>
+      <UpdateBanner />
       <div className={styles.body}>
         <nav className={styles.nav}>
           <TabList
@@ -270,9 +284,11 @@ export default function App() {
 
   return (
     <FluentProvider theme={theme} style={{ height: "100%" }}>
-      <LaunchStatusProvider>
-        <AppShell />
-      </LaunchStatusProvider>
+      <AppUpdateProvider>
+        <LaunchStatusProvider>
+          <AppShell />
+        </LaunchStatusProvider>
+      </AppUpdateProvider>
     </FluentProvider>
   );
 }

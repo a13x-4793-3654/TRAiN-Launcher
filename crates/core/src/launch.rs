@@ -207,12 +207,14 @@ pub async fn launch(
 
     tokio::fs::create_dir_all(game_dir).await?;
 
-    let mut child = Command::new(program)
+    let mut command = Command::new(program);
+    command
         .args(args)
         .current_dir(game_dir)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
+        .stderr(Stdio::piped());
+    crate::process_ext::suppress_console_window(&mut command);
+    let mut child = command.spawn()?;
 
     // GUIアプリとして起動した場合、標準出力/標準エラーを継承(inherit)してもコンソールが
     // 存在せず出力は失われてしまう。Javaが見つからない・クラスパス不正・LWJGLネイティブの

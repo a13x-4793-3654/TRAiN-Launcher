@@ -10,6 +10,7 @@ pub mod maven;
 pub mod mod_loader;
 pub mod nbt;
 pub mod paths;
+pub mod process_ext;
 pub mod profile;
 pub mod resource_pack_options;
 pub mod rules;

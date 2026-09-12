@@ -392,10 +392,13 @@ async fn ensure_installer_based_loader_installed(
     let versions_before = list_installed_version_ids(paths).await;
 
     let install_arg = format!("--installClient={}", paths.root().display());
-    let status = Command::new(java_path)
+    let mut installer_command = Command::new(java_path);
+    installer_command
         .arg("-jar")
         .arg(&installer_path)
-        .arg(&install_arg)
+        .arg(&install_arg);
+    crate::process_ext::suppress_console_window(&mut installer_command);
+    let status = installer_command
         .status()
         .await
         .map_err(|err| {

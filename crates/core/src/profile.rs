@@ -14,6 +14,11 @@
 //!   TRAiN Launcher側でも表示・編集・起動できるようにする([`ProfileSource::Official`])。
 //! 公式ランチャー側との連携(`launcher_profiles.json`の読み書き)に失敗しても、TRAiN側の
 //! `profiles.json` への保存自体は成功させる(標準エラー出力にログを残すのみに留める)。
+//!
+//! Mod・リソースパックは、TRAiN管理プロファイル(`ProfileSource::Train`)ごとに専用の
+//! 隔離フォルダで管理する([`ensure_isolated_game_dir`])。Minecraftのバージョン・
+//! Modローダーが異なるプロファイル同士で同じ `mods`/`resourcepacks` フォルダを共有すると、
+//! 一方のMod・リソースパックがもう一方でも読み込まれてしまい起動できなくなるため。
 
 use serde::{Deserialize, Serialize};
 
@@ -55,8 +60,15 @@ pub struct Profile {
     #[serde(default)]
     pub server_id: Option<String>,
     /// このプロファイル専用のゲームディレクトリ(Mod・リソースパック・セーブデータ・
-    /// `options.txt` 等の実際の保存先)。未指定の場合は全プロファイル共通の `.minecraft`
-    /// 相当ディレクトリ([`crate::paths::effective_minecraft_root`])を使う。
+    /// `options.txt` 等の実際の保存先)。
+    ///
+    /// TRAiN管理プロファイル(`ProfileSource::Train`)で未指定の場合、[`create_profile`]/
+    /// [`update_profile`]経由で保存された後に[`ensure_isolated_game_dir`]が
+    /// [`crate::paths::profile_game_dir`]の専用フォルダを自動的に割り当てる
+    /// (Minecraftのバージョン・Modローダーが異なるプロファイル同士でMod・リソースパックが
+    /// 混在して動作しなくなることを防ぐため)。[`Profile::effective_game_dir`]自体は、
+    /// 未指定の場合の従来通りのフォールバック(全プロファイル共通の `.minecraft` 相当
+    /// ディレクトリ)も引き続きサポートする(`ProfileSource::Official`のプロファイル等)。
     ///
     /// バージョンjar・ライブラリ・アセットは指定の有無に関わらず常に共通ディレクトリ側を
     /// 再利用する(ディスク容量節約のため、これらはこのフィールドの影響を受けない)。
@@ -90,7 +102,9 @@ pub struct Profile {
     /// TRAiNがこのプロファイルのために共有 `.minecraft/mods` へ配置したファイル名一覧。
     /// サーバー切り替え時に、このプロファイルが配置したファイルだけを安全に削除するために使う
     /// (ユーザーが手動で追加したMod・他プロファイルが配置したファイルには一切触れない)。
-    /// `game_dir` を独自指定しているプロファイル(共有フォルダを使わない)では常に空。
+    /// `game_dir` を独自指定している(専用フォルダを割り当て済みの)プロファイルでは
+    /// 常に空。[`ensure_isolated_game_dir`]が専用フォルダを割り当てる際、ここに記録済みの
+    /// ファイルは共有フォルダから新しい専用フォルダへ移動される。
     #[serde(default)]
     pub managed_mod_filenames: Vec<String>,
     /// 同様に `.minecraft/resourcepacks` へ配置したファイル名一覧。
@@ -274,6 +288,80 @@ pub fn delete_profile(id: &str) -> Result<(), CoreError> {
     Ok(())
 }
 
+/// TRAiN管理プロファイル(`ProfileSource::Train`)に、専用の隔離ゲームディレクトリを
+/// 割り当てる(`game_dir` が未指定の場合のみ)。
+///
+/// 元々Mod・リソースパックは全プロファイル共通の `.minecraft` フォルダで管理していたが、
+/// Minecraftのバージョン・Modローダーが異なるプロファイル同士でMod・リソースパックが
+/// 混在すると起動できなくなる問題があったため、`game_dir` が未指定(=共通フォルダを使う
+/// 設定)のTRAiN管理プロファイルを見つけ次第、[`crate::paths::profile_game_dir`] が返す
+/// 専用フォルダを割り当てる。
+///
+/// フォルダの割り当て(`launcher_profiles.json`への同期)より前に、必ず実際の
+/// ディレクトリ(`mods`/`resourcepacks`)をディスク上に作成する。以前このタイミングが
+/// 逆(ディレクトリ未作成のままプロファイルを同期)だったため、公式Minecraft Launcherが
+/// `gameDir` の実体が存在しないプロファイルを一覧に表示しない問題が発生していた。
+///
+/// このプロファイルが既に管理していたファイル(`managed_mod_filenames`/
+/// `managed_resource_pack_filenames`)があれば、共有フォルダから新しい専用フォルダへ
+/// 移動する(移動元に存在しない場合は無視する)。共有フォルダ内の、このプロファイルが
+/// 管理していないファイル(手動で追加したMod・他プロファイルのファイル)には一切触れない
+/// (どのプロファイルのものか区別できないため。該当プロファイルでのみ再導入が必要)。
+///
+/// `ProfileSource::Official` のプロファイル、既に `game_dir` が指定済み(空文字列を除く)の
+/// プロファイルは何もせずそのまま返す。専用フォルダの割り当て・移動を行った場合は
+/// [`update_profile`] で永続化・公式ランチャーへの同期まで行う。
+pub fn ensure_isolated_game_dir(id: &str) -> Result<Profile, CoreError> {
+    let mut profile = get_profile(id)?;
+    if profile.source != ProfileSource::Train {
+        return Ok(profile);
+    }
+    let already_set = profile
+        .game_dir
+        .as_deref()
+        .map(str::trim)
+        .map(|dir| !dir.is_empty())
+        .unwrap_or(false);
+    if already_set {
+        return Ok(profile);
+    }
+
+    let shared_root = minecraft_root();
+    let isolated_dir = crate::paths::profile_game_dir(&profile.id);
+    std::fs::create_dir_all(isolated_dir.join("mods"))?;
+    std::fs::create_dir_all(isolated_dir.join("resourcepacks"))?;
+
+    migrate_managed_files(
+        &profile.managed_mod_filenames,
+        &shared_root.join("mods"),
+        &isolated_dir.join("mods"),
+    );
+    migrate_managed_files(
+        &profile.managed_resource_pack_filenames,
+        &shared_root.join("resourcepacks"),
+        &isolated_dir.join("resourcepacks"),
+    );
+
+    profile.game_dir = Some(isolated_dir.display().to_string());
+    update_profile(profile.clone())?;
+    Ok(profile)
+}
+
+/// `filenames` の各ファイルを `from_dir` から `to_dir` へ移動する。移動元に存在しない
+/// ファイルは無視する(既に手動削除されている・元々存在しなかった等)。個々の移動失敗は
+/// 標準エラー出力へのログ出力のみに留め、他のファイルの移動は継続する。
+fn migrate_managed_files(filenames: &[String], from_dir: &std::path::Path, to_dir: &std::path::Path) {
+    for filename in filenames {
+        let src = from_dir.join(filename);
+        if !src.exists() {
+            continue;
+        }
+        if let Err(err) = std::fs::rename(&src, to_dir.join(filename)) {
+            eprintln!("failed to migrate managed file {filename:?} to isolated profile dir: {err}");
+        }
+    }
+}
+
 /// 指定プロファイルの最終起動日時を現在時刻(UTC)で更新する。
 ///
 /// ホーム画面の「最近使ったプロファイル」表示のために、`launch_minecraft`/
@@ -341,5 +429,36 @@ mod tests {
             profile.effective_game_dir(shared_root),
             Path::new("/custom/profile-dir")
         );
+    }
+
+    #[test]
+    fn migrate_managed_files_moves_tracked_files_only() {
+        let from = tempfile::tempdir().unwrap();
+        let to = tempfile::tempdir().unwrap();
+        std::fs::write(from.path().join("tracked.jar"), b"tracked").unwrap();
+        std::fs::write(from.path().join("untracked.jar"), b"untracked").unwrap();
+
+        migrate_managed_files(
+            &["tracked.jar".to_string()],
+            from.path(),
+            to.path(),
+        );
+
+        assert!(!from.path().join("tracked.jar").exists());
+        assert!(to.path().join("tracked.jar").exists());
+        // 管理対象外のファイルには一切触れない(他プロファイル・手動追加のMod等)。
+        assert!(from.path().join("untracked.jar").exists());
+        assert!(!to.path().join("untracked.jar").exists());
+    }
+
+    #[test]
+    fn migrate_managed_files_silently_skips_missing_source_files() {
+        let from = tempfile::tempdir().unwrap();
+        let to = tempfile::tempdir().unwrap();
+
+        // パニックせず、移動先にも作られないことのみ確認する。
+        migrate_managed_files(&["already-deleted.jar".to_string()], from.path(), to.path());
+
+        assert!(!to.path().join("already-deleted.jar").exists());
     }
 }

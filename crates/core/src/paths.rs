@@ -105,6 +105,20 @@ pub fn default_launcher_root() -> PathBuf {
         .join("train-launcher")
 }
 
+/// TRAiN管理プロファイル(`ProfileSource::Train`)専用の、隔離されたゲームディレクトリ
+/// (Mod・リソースパック・セーブデータ等の実際の保存先)。
+///
+/// [`crate::profile::Profile::game_dir`] が未指定のTRAiN管理プロファイルに対して、
+/// 全プロファイル共通の `.minecraft` の代わりに割り当てる既定値
+/// ([`crate::profile::ensure_isolated_game_dir`]参照)。Minecraftのバージョン・
+/// Modローダーが異なるプロファイル同士でMod・リソースパックが混在して動作しなくなることを
+/// 防ぐため、プロファイルごとに専用のフォルダを使う。
+pub fn profile_game_dir(profile_id: &str) -> PathBuf {
+    default_launcher_root()
+        .join("profiles")
+        .join(safe_path_component(profile_id))
+}
+
 /// 公式Minecraft Launcherが使用するゲームデータディレクトリ(`.minecraft` 相当)。
 ///
 /// TRAiN Launcherはバージョンjar・ライブラリ・アセットを公式Launcherと共有する設計とし、
@@ -184,6 +198,22 @@ mod tests {
         let path = paths.asset_index_path("../../evil");
         assert!(path.starts_with(paths.assets_dir()));
         assert!(!path.to_string_lossy().contains(".."));
+    }
+
+    #[test]
+    fn profile_game_dir_rejects_path_traversal() {
+        let dir = profile_game_dir("../../evil");
+        assert!(dir.starts_with(default_launcher_root().join("profiles")));
+        assert!(!dir.to_string_lossy().contains(".."));
+    }
+
+    #[test]
+    fn profile_game_dir_keeps_normal_ids_unchanged() {
+        let dir = profile_game_dir("train-abc123");
+        assert_eq!(
+            dir,
+            default_launcher_root().join("profiles").join("train-abc123")
+        );
     }
 }
 

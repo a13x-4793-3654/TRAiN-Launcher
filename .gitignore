@@ -4,6 +4,8 @@ obj/
 dist/
 build/
 out/
+target/
+apps/desktop/gen/
 
 # Dependencies
 node_modules/

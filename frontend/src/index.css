@@ -1,0 +1,15 @@
+/* ブラウザのUAスタイルシートが body に既定マージンを与えるため、
+   これを除去しないと 100vw/100vh を指定した要素がウィンドウの右・下にはみ出し、
+   不要なスクロールバーが表示されてしまう。 */
+html,
+body,
+#root {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  width: 100%;
+}
+
+body {
+  overflow: hidden;
+}

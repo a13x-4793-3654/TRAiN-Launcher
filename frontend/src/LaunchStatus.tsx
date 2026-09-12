@@ -104,6 +104,9 @@ const useStyles = makeStyles({
     flexDirection: "column",
     gap: tokens.spacingVerticalXS,
   },
+  progressText: {
+    overflowWrap: "anywhere",
+  },
 });
 
 /**
@@ -134,7 +137,9 @@ export function LaunchingModal() {
                       : undefined
                   }
                 />
-                <Caption1>{progress?.phase_label ?? "準備中..."}</Caption1>
+                <Caption1 className={styles.progressText}>
+                  {progress?.phase_label ?? "準備中..."}
+                </Caption1>
               </div>
               <Caption1>完了するまでお待ちください。</Caption1>
             </div>

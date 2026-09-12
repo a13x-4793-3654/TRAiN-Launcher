@@ -159,9 +159,6 @@ pub async fn download_version_files(
     on_progress: ProgressCallback,
 ) -> Result<version_manifest::ResolvedVersion, CoreError> {
     let paths = LauncherPaths::new(destination);
-    let platform = CurrentPlatform::detect();
-    let client = reqwest::Client::new();
-
     on_progress(DownloadProgress {
         phase: DownloadPhase::FetchingManifest,
         completed: 0,
@@ -173,6 +170,19 @@ pub async fn download_version_files(
         completed: 1,
         total: 1,
     });
+
+    download_resolved_version_files(resolved, destination, on_progress).await
+}
+
+/// Java選択・Modローダー導入時に解決済みのバージョン情報を再利用してダウンロードする。
+pub async fn download_resolved_version_files(
+    resolved: version_manifest::ResolvedVersion,
+    destination: &Path,
+    on_progress: ProgressCallback,
+) -> Result<version_manifest::ResolvedVersion, CoreError> {
+    let paths = LauncherPaths::new(destination);
+    let platform = CurrentPlatform::detect();
+    let client = reqwest::Client::new();
 
     // 起動時にMojangへ再問い合わせしなくて済むよう、バージョンJSONをキャッシュしておく。
     // Modローダー導入済みバージョン(`VersionSource::Local`)の場合、この元ファイルは
@@ -429,4 +439,3 @@ async fn download_assets(
     }
     Ok(())
 }
-

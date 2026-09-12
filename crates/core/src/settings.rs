@@ -15,7 +15,8 @@ use crate::CoreError;
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AppSettings {
     /// 未指定のプロファイルで使用するJava実行ファイルのパス。
-    /// `None` の場合はPATH上の `java` を使用する。
+    /// 必要なJavaバージョン・アーキテクチャに適合する場合に優先する。
+    /// 未指定または不適合の場合はインストール済みJavaを検索し、無ければ自動取得する。
     #[serde(default)]
     pub java_path: Option<String>,
     /// ゲームディレクトリ(バージョンjar・ライブラリ・アセット・Mod・リソースパック等の

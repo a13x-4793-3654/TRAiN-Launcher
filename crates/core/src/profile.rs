@@ -76,7 +76,8 @@ pub struct Profile {
     /// 対応しており、双方向に同期される。
     #[serde(default)]
     pub game_dir: Option<String>,
-    /// 未指定の場合はPATH上の `java` を使用する。
+    /// 必要条件に適合する場合に優先するJava実行ファイル。
+    /// 未指定または不適合の場合は既定設定・自動検索・自動取得の順に解決する。
     #[serde(default)]
     pub java_path: Option<String>,
     /// JVMヒープ最大値(MB)。未指定の場合は `-Xmx` を付与しない(JVM既定値に任せる)。

@@ -339,13 +339,17 @@ function InstallPanel(props: {
   );
 }
 
+/** まだプロファイルを選択していない状態を表す内部値。 */
+const NO_PROFILE_SELECTED = "";
+
 /**
  * Mod / リソースパック画面。
  *
- * Modrinth・CurseForgeのURLを指定してMod/リソースパックを解決・依存関係の自動解決込みで
- * 導入する。導入先は対象プロファイル選択欄で選んだプロファイル専用のゲームディレクトリ
+ * 最初に対象プロファイルを選択させ、選択後にそのプロファイル専用のゲームディレクトリ
  * (未設定の場合は公式Minecraft Launcherと共有する `.minecraft`
- * フォルダ)。「共通(全プロファイル)」を選ぶと、専用ゲームディレクトリを持たない
+ * フォルダ)に導入済みのMod・リソースパックを表示・管理する。プロファイルを選択する
+ * までは一覧・導入フォームを表示しない(どのプロファイルの内容を見ているか誤認しない
+ * ようにするため)。「共通(全プロファイル)」を選ぶと、専用ゲームディレクトリを持たない
  * プロファイル全てに適用される既定の場所を対象にする。「複数のModをまとめて導入」
  * ボタンから、複数URLを一括で解決・導入できる「Mod導入ウィザード」(`ModWizard.tsx`)も
  * 開ける。CurseForgeのURLを解決するには
@@ -356,7 +360,9 @@ export function ModsPage() {
   const { dispatchToast } = useToastController(TOASTER_ID);
 
   const [profiles, setProfiles] = useState<Profile[]>([]);
-  const [selectedProfile, setSelectedProfile] = useState<string>(SHARED_PROFILE);
+  const [selectedProfile, setSelectedProfile] = useState<string>(
+    NO_PROFILE_SELECTED,
+  );
   const [wizardOpen, setWizardOpen] = useState(false);
   const [modsRefreshSignal, setModsRefreshSignal] = useState(0);
 
@@ -375,10 +381,13 @@ export function ModsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const hasSelection = selectedProfile !== NO_PROFILE_SELECTED;
   const profileId = selectedProfile === SHARED_PROFILE ? null : selectedProfile;
   const selectedProfileName =
-    profiles.find((profile) => profile.id === selectedProfile)?.name ??
-    "共通(全プロファイル)";
+    selectedProfile === SHARED_PROFILE
+      ? "共通(全プロファイル)"
+      : (profiles.find((profile) => profile.id === selectedProfile)?.name ??
+        "");
 
   return (
     <div>
@@ -390,29 +399,20 @@ export function ModsPage() {
         依存Modも自動的に解決してまとめて導入します。
       </Body1>
 
-      <div className={styles.wizardRow}>
-        <Button
-          appearance="secondary"
-          icon={<WandRegular />}
-          onClick={() => setWizardOpen(true)}
-        >
-          複数のModをまとめて導入(ウィザード)
-        </Button>
-      </div>
-
       <Field
         label={
-          <InfoLabel info="専用ゲームディレクトリを設定していないプロファイルは「共通(全プロファイル)」と同じ場所を参照します">
+          <InfoLabel info="選択したプロファイル専用のフォルダに導入済みのMod・リソースパックを表示します。専用フォルダを設定していないプロファイルは「共通(全プロファイル)」と同じ場所を参照します">
             対象プロファイル
           </InfoLabel>
         }
         className={styles.profileSelector}
       >
         <Dropdown
+          placeholder="プロファイルを選択してください"
           value={selectedProfileName}
-          selectedOptions={[selectedProfile]}
+          selectedOptions={hasSelection ? [selectedProfile] : []}
           onOptionSelect={(_event, data) =>
-            setSelectedProfile(data.optionValue ?? SHARED_PROFILE)
+            setSelectedProfile(data.optionValue ?? NO_PROFILE_SELECTED)
           }
         >
           <Option key={SHARED_PROFILE} value={SHARED_PROFILE}>
@@ -426,37 +426,56 @@ export function ModsPage() {
         </Dropdown>
       </Field>
 
-      <InstallPanel
-        title="Mod"
-        description="Modrinthまたは CurseForge のMod詳細ページのURLを貼り付けてください。"
-        urlPlaceholder="例: https://modrinth.com/mod/sodium"
-        resolveCommand="resolve_mod_url"
-        installCommand="install_mod"
-        listCommand="list_installed_mods"
-        removeCommand="remove_installed_mod"
-        installReturnsList={true}
-        profileId={profileId}
-        refreshSignal={modsRefreshSignal}
-      />
+      {!hasSelection ? (
+        <Body1 as="p" block className={styles.section}>
+          上のプルダウンから対象プロファイルを選択すると、そのプロファイルに導入済みの
+          Mod・リソースパックが表示されます。
+        </Body1>
+      ) : (
+        <>
+          <div className={styles.wizardRow}>
+            <Button
+              appearance="secondary"
+              icon={<WandRegular />}
+              onClick={() => setWizardOpen(true)}
+            >
+              複数のModをまとめて導入(ウィザード)
+            </Button>
+          </div>
 
-      <InstallPanel
-        title="リソースパック"
-        description="Modrinthまたは CurseForge のリソースパック詳細ページのURLを貼り付けてください。"
-        urlPlaceholder="例: https://modrinth.com/resourcepack/faithful-64x"
-        installCommand="install_resource_pack"
-        listCommand="list_installed_resource_packs"
-        removeCommand="remove_installed_resource_pack"
-        installReturnsList={false}
-        profileId={profileId}
-      />
+          <InstallPanel
+            title={`Mod (対象: ${selectedProfileName})`}
+            description="Modrinthまたは CurseForge のMod詳細ページのURLを貼り付けてください。"
+            urlPlaceholder="例: https://modrinth.com/mod/sodium"
+            resolveCommand="resolve_mod_url"
+            installCommand="install_mod"
+            listCommand="list_installed_mods"
+            removeCommand="remove_installed_mod"
+            installReturnsList={true}
+            profileId={profileId}
+            refreshSignal={modsRefreshSignal}
+          />
 
-      <div className={styles.section} />
-      <ModInstallWizardDialog
-        open={wizardOpen}
-        onOpenChange={setWizardOpen}
-        profileId={profileId}
-        onInstalled={() => setModsRefreshSignal((value) => value + 1)}
-      />
+          <InstallPanel
+            title={`リソースパック (対象: ${selectedProfileName})`}
+            description="Modrinthまたは CurseForge のリソースパック詳細ページのURLを貼り付けてください。"
+            urlPlaceholder="例: https://modrinth.com/resourcepack/faithful-64x"
+            installCommand="install_resource_pack"
+            listCommand="list_installed_resource_packs"
+            removeCommand="remove_installed_resource_pack"
+            installReturnsList={false}
+            profileId={profileId}
+          />
+
+          <div className={styles.section} />
+          <ModInstallWizardDialog
+            open={wizardOpen}
+            onOpenChange={setWizardOpen}
+            profileId={profileId}
+            onInstalled={() => setModsRefreshSignal((value) => value + 1)}
+          />
+        </>
+      )}
       <Toaster toasterId={TOASTER_ID} />
     </div>
   );

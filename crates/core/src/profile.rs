@@ -102,9 +102,12 @@ pub struct Profile {
     /// TRAiNがこのプロファイルのために共有 `.minecraft/mods` へ配置したファイル名一覧。
     /// サーバー切り替え時に、このプロファイルが配置したファイルだけを安全に削除するために使う
     /// (ユーザーが手動で追加したMod・他プロファイルが配置したファイルには一切触れない)。
-    /// `game_dir` を独自指定している(専用フォルダを割り当て済みの)プロファイルでは
-    /// 常に空。[`ensure_isolated_game_dir`]が専用フォルダを割り当てる際、ここに記録済みの
-    /// ファイルは共有フォルダから新しい専用フォルダへ移動される。
+    /// `game_dir` の指定有無に関わらず、共有フォルダから専用フォルダへの移行が未完了の
+    /// ファイルがあれば空にならない。[`ensure_isolated_game_dir`]が専用フォルダを
+    /// 割り当てる際(または割り当て済みでも移行未完了のファイルが残っている場合)、
+    /// ここに記録済みのファイルを共有フォルダから専用フォルダへ移動し、移動が成功した
+    /// ものだけをこの一覧から取り除く(失敗したファイルは次回呼び出し時に再試行できる
+    /// よう残す)。
     #[serde(default)]
     pub managed_mod_filenames: Vec<String>,
     /// 同様に `.minecraft/resourcepacks` へ配置したファイル名一覧。
@@ -307,10 +310,16 @@ pub fn delete_profile(id: &str) -> Result<(), CoreError> {
 /// 移動する(移動元に存在しない場合は無視する)。共有フォルダ内の、このプロファイルが
 /// 管理していないファイル(手動で追加したMod・他プロファイルのファイル)には一切触れない
 /// (どのプロファイルのものか区別できないため。該当プロファイルでのみ再導入が必要)。
+/// 移動に失敗したファイル(移行先に同名のファイル・ディレクトリが既に存在する等)は
+/// `managed_mod_filenames`/`managed_resource_pack_filenames` に残したままにし、
+/// 専用フォルダの割り当て自体は先に確定させる(公式ランチャーでの表示問題を再発させない
+/// ため)。残った未移行ファイルは、次回この関数が呼ばれた際(起動・プロファイル保存・
+/// サーバー再参加時など)に再試行される。
 ///
-/// `ProfileSource::Official` のプロファイル、既に `game_dir` が指定済み(空文字列を除く)の
-/// プロファイルは何もせずそのまま返す。専用フォルダの割り当て・移動を行った場合は
-/// [`update_profile`] で永続化・公式ランチャーへの同期まで行う。
+/// `ProfileSource::Official` のプロファイルは何もせずそのまま返す。既に `game_dir` が
+/// 指定済み(空文字列を除く)のプロファイルは、未移行ファイルが残っていなければそのまま
+/// 返す。専用フォルダの割り当て・移動を行った場合は [`update_profile`] で永続化・
+/// 公式ランチャーへの同期まで行う。
 pub fn ensure_isolated_game_dir(id: &str) -> Result<Profile, CoreError> {
     let mut profile = get_profile(id)?;
     if profile.source != ProfileSource::Train {
@@ -322,44 +331,83 @@ pub fn ensure_isolated_game_dir(id: &str) -> Result<Profile, CoreError> {
         .map(str::trim)
         .map(|dir| !dir.is_empty())
         .unwrap_or(false);
-    if already_set {
+    let has_pending_migrations = !profile.managed_mod_filenames.is_empty()
+        || !profile.managed_resource_pack_filenames.is_empty();
+    if already_set && !has_pending_migrations {
         return Ok(profile);
     }
 
     let shared_root = minecraft_root();
-    let isolated_dir = crate::paths::profile_game_dir(&profile.id);
-    std::fs::create_dir_all(isolated_dir.join("mods"))?;
-    std::fs::create_dir_all(isolated_dir.join("resourcepacks"))?;
+    let target_dir = if already_set {
+        // 既にユーザー独自の`game_dir`が設定されている場合はそれを尊重する
+        // (未移行ファイルの再試行のみを行う)。
+        std::path::PathBuf::from(profile.game_dir.as_deref().unwrap_or_default().trim())
+    } else {
+        crate::paths::profile_game_dir(&profile.id)
+    };
+    std::fs::create_dir_all(target_dir.join("mods"))?;
+    std::fs::create_dir_all(target_dir.join("resourcepacks"))?;
 
-    migrate_managed_files(
+    profile.managed_mod_filenames = migrate_managed_files(
         &profile.managed_mod_filenames,
         &shared_root.join("mods"),
-        &isolated_dir.join("mods"),
+        &target_dir.join("mods"),
     );
-    migrate_managed_files(
+    profile.managed_resource_pack_filenames = migrate_managed_files(
         &profile.managed_resource_pack_filenames,
         &shared_root.join("resourcepacks"),
-        &isolated_dir.join("resourcepacks"),
+        &target_dir.join("resourcepacks"),
     );
 
-    profile.game_dir = Some(isolated_dir.display().to_string());
+    profile.game_dir = Some(target_dir.display().to_string());
     update_profile(profile.clone())?;
     Ok(profile)
 }
 
 /// `filenames` の各ファイルを `from_dir` から `to_dir` へ移動する。移動元に存在しない
-/// ファイルは無視する(既に手動削除されている・元々存在しなかった等)。個々の移動失敗は
-/// 標準エラー出力へのログ出力のみに留め、他のファイルの移動は継続する。
-fn migrate_managed_files(filenames: &[String], from_dir: &std::path::Path, to_dir: &std::path::Path) {
+/// ファイルは無視する(既に手動削除されている・元々存在しなかった等)。
+///
+/// 戻り値は、まだ移行できていない(=引き続き追跡が必要な)ファイル名一覧。移動に失敗
+/// した場合(標準エラー出力へログを出力した上で)そのファイル名を戻り値に含め、
+/// 呼び出し元(`ensure_isolated_game_dir`)が次回以降も再試行できるようにする。
+/// 移動元に存在しなかったファイル、パストラバーサル等で不正と判断したファイルは
+/// (再試行しても解決しないため)戻り値に含めない。
+///
+/// `filenames` は永続化された`profiles.json`由来であり、外部(悪意ある編集・過去の
+/// 不具合等)から不正な値が混入している可能性を排除できないため、`from_dir`/`to_dir`
+/// への結合前に単一の安全なパス要素であることを検証する(パス区切り文字・`..`・
+/// 絶対パスを含む場合は無視し、`mods`/`resourcepacks` の外側のファイルには一切
+/// アクセスしない)。
+fn migrate_managed_files(
+    filenames: &[String],
+    from_dir: &std::path::Path,
+    to_dir: &std::path::Path,
+) -> Vec<String> {
+    let mut pending = Vec::new();
     for filename in filenames {
+        let path = std::path::Path::new(filename);
+        let is_safe_component = !filename.is_empty()
+            && filename != ".."
+            && !filename.contains('/')
+            && !filename.contains('\\')
+            && !path.is_absolute()
+            && path.file_name().is_some();
+        if !is_safe_component {
+            // 安全な単一パス要素ではないファイル名は、次回再試行しても解決しないため
+            // 追跡対象から外す(移動もしない)。
+            continue;
+        }
+
         let src = from_dir.join(filename);
         if !src.exists() {
             continue;
         }
         if let Err(err) = std::fs::rename(&src, to_dir.join(filename)) {
             eprintln!("failed to migrate managed file {filename:?} to isolated profile dir: {err}");
+            pending.push(filename.clone());
         }
     }
+    pending
 }
 
 /// 指定プロファイルの最終起動日時を現在時刻(UTC)で更新する。
@@ -438,12 +486,13 @@ mod tests {
         std::fs::write(from.path().join("tracked.jar"), b"tracked").unwrap();
         std::fs::write(from.path().join("untracked.jar"), b"untracked").unwrap();
 
-        migrate_managed_files(
+        let pending = migrate_managed_files(
             &["tracked.jar".to_string()],
             from.path(),
             to.path(),
         );
 
+        assert!(pending.is_empty());
         assert!(!from.path().join("tracked.jar").exists());
         assert!(to.path().join("tracked.jar").exists());
         // 管理対象外のファイルには一切触れない(他プロファイル・手動追加のMod等)。
@@ -456,9 +505,45 @@ mod tests {
         let from = tempfile::tempdir().unwrap();
         let to = tempfile::tempdir().unwrap();
 
-        // パニックせず、移動先にも作られないことのみ確認する。
-        migrate_managed_files(&["already-deleted.jar".to_string()], from.path(), to.path());
+        // パニックせず、移動先にも作られず、再試行対象にも残らないことを確認する。
+        let pending =
+            migrate_managed_files(&["already-deleted.jar".to_string()], from.path(), to.path());
 
+        assert!(pending.is_empty());
         assert!(!to.path().join("already-deleted.jar").exists());
+    }
+
+    #[test]
+    fn migrate_managed_files_ignores_path_traversal_filenames() {
+        let base = tempfile::tempdir().unwrap();
+        let from = base.path().join("from");
+        let to = base.path().join("to");
+        std::fs::create_dir_all(&from).unwrap();
+        std::fs::create_dir_all(&to).unwrap();
+        // `from`の外側(隔離フォルダの外)に、移動されると困るファイルを置いておく。
+        std::fs::write(base.path().join("outside.jar"), b"secret").unwrap();
+
+        let pending = migrate_managed_files(&["../outside.jar".to_string()], &from, &to);
+
+        // 不正なファイル名は再試行しても解決しないため、追跡対象からも外れる。
+        assert!(pending.is_empty());
+        // `from`の外側のファイルには一切手を付けていないこと(パストラバーサル対策)。
+        assert!(base.path().join("outside.jar").exists());
+        assert!(!to.join("outside.jar").exists());
+    }
+
+    #[test]
+    fn migrate_managed_files_keeps_failed_renames_pending_for_retry() {
+        let from = tempfile::tempdir().unwrap();
+        let to = tempfile::tempdir().unwrap();
+        std::fs::write(from.path().join("conflict.jar"), b"data").unwrap();
+        // 移動先に同名のディレクトリを作っておき、rename が必ず失敗するようにする。
+        std::fs::create_dir(to.path().join("conflict.jar")).unwrap();
+
+        let pending = migrate_managed_files(&["conflict.jar".to_string()], from.path(), to.path());
+
+        assert_eq!(pending, vec!["conflict.jar".to_string()]);
+        // 移動に失敗したファイルは移行元に残ったままになる(次回呼び出し時に再試行できる)。
+        assert!(from.path().join("conflict.jar").exists());
     }
 }

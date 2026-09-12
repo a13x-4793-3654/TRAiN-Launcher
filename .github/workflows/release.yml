@@ -14,7 +14,15 @@ name: Release
 #   - Variables: `TRAIN_LAUNCHER_API_BASE_URL` (本番TRAiN APIのベースURL。ビルド時に
 #     `crates/train-api/src/lib.rs` の `DEFAULT_API_BASE_URL` へ埋め込まれ、一般ユーザーが
 #     環境変数を何も設定しなくても実データに接続できるようにする。未設定の場合、ビルドされる
-#     ランチャーはモック実装にフォールバックする)
+#     ランチャーはモック実装にフォールバックする) / `TRAIN_LAUNCHER_MS_CLIENT_ID`
+#     (Microsoft Entra IDで登録したアプリのクライアントID。`crates/auth/src/config.rs` の
+#     `DEFAULT_MS_CLIENT_ID` へ埋め込まれる) / `TRAIN_LAUNCHER_DISCORD_CLIENT_ID`
+#     (Discord Developer Portalで登録したアプリのクライアントID。同様に
+#     `DEFAULT_DISCORD_CLIENT_ID` へ埋め込まれる)。いずれも公開クライアント向けの
+#     クライアントIDであり秘匿情報ではないため、Secretsではなく非暗号化のVariablesを使う
+#     (Discordのclient_secretは、デスクトップアプリへ埋め込んでも実質的に秘匿できないため
+#     ビルドに埋め込まない。Developer Portal側でclient_secret不要のフローが使えることを
+#     確認済み)
 # - リリース前に `apps/desktop/tauri.conf.json` の `version` (と `Cargo.toml` の
 #   `workspace.package.version`) を新しいバージョンへ更新し、mainへマージしておくこと。
 on:
@@ -75,6 +83,8 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           TRAIN_LAUNCHER_DEFAULT_API_BASE_URL: ${{ vars.TRAIN_LAUNCHER_API_BASE_URL }}
+          TRAIN_LAUNCHER_DEFAULT_MS_CLIENT_ID: ${{ vars.TRAIN_LAUNCHER_MS_CLIENT_ID }}
+          TRAIN_LAUNCHER_DEFAULT_DISCORD_CLIENT_ID: ${{ vars.TRAIN_LAUNCHER_DISCORD_CLIENT_ID }}
         with:
           projectPath: apps/desktop
           updaterJsonPreferNsis: true

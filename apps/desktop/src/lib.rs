@@ -3,7 +3,8 @@
 //! フロントエンド(React)から `@tauri-apps/api` の `invoke()` 経由で呼び出す
 //! Tauri commandsをここに定義する。認証系commandは `train_launcher_auth` の実装を呼び出し、
 //! 取得したトークンはOSの資格情報ストア(keyring)に保存する。
-//! 実際にサインインを試すには Microsoft Entra ID / Discord Developer Portal でのアプリ登録と、
+//! 実際にサインインを試すには Microsoft Entra ID / Discord Developer Portal でのアプリ登録が
+//! 必要。公式配布版はクライアントIDをビルド時に埋め込み済みだが、ローカル開発ビルドでは
 //! 対応する環境変数(`TRAIN_LAUNCHER_MS_CLIENT_ID` 等、詳細はREADME参照)の設定が必要。
 
 use std::sync::{Arc, Mutex};

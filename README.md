@@ -73,23 +73,21 @@ TRAiN Launcher は、TRAiN 管理下のサーバーに参加しているユー�
 
 ### サインイン機能を試すための環境変数(OAuth2アプリ登録)
 
-MSA/Discordサインインを実際に動作させるには、それぞれのアプリ登録情報を環境変数として設定する必要があります。未設定の場合、サインインボタンを押すと日本語のエラーメッセージ(どの環境変数が不足しているか)が表示されます。
+公式配布版(GitHub Releasesのビルド)は、リリースCI(`.github/workflows/release.yml`)がGitHub Actionsのリポジトリ変数からMS/DiscordのクライアントIDをビルド時に埋め込むため、一般ユーザーは環境変数を何も設定しなくてもサインインできます([`DEFAULT_MS_CLIENT_ID`] / [`DEFAULT_DISCORD_CLIENT_ID`](crates/auth/src/config.rs))。ローカル開発ビルド(この変数を設定せずに`cargo build`/`npm run dev`した場合)はこの既定値が空になるため、以下の**実行時**環境変数を設定しない限り、サインインボタンを押すと日本語のエラーメッセージ(どの環境変数が不足しているか)が表示されます。
 
 | 環境変数 | 必須 | 説明 |
 | --- | --- | --- |
-| `TRAIN_LAUNCHER_MS_CLIENT_ID` | Microsoftサインインに必須 | [Microsoft Entra ID](https://portal.azure.com/) で登録したアプリの クライアントID。個人用Microsoftアカウント (`consumers` テナント) 向けに、パブリッククライアントとしてデバイスコードフローを許可する必要があります |
-| `TRAIN_LAUNCHER_DISCORD_CLIENT_ID` | Discordサインインに必須 | [Discord Developer Portal](https://discord.com/developers/applications) で登録したアプリのクライアントID |
-| `TRAIN_LAUNCHER_DISCORD_CLIENT_SECRET` | 任意 | Discordアプリのクライアントシークレット(Developer Portal側の設定によっては不要) |
+| `TRAIN_LAUNCHER_MS_CLIENT_ID` | Microsoftサインインに必須(公式配布版は既定値を使用、ローカル開発ビルドのみ設定が必要) | [Microsoft Entra ID](https://portal.azure.com/) で登録したアプリの クライアントID。個人用Microsoftアカウント (`consumers` テナント) 向けに、パブリッククライアントとしてデバイスコードフローを許可する必要があります |
+| `TRAIN_LAUNCHER_DISCORD_CLIENT_ID` | Discordサインインに必須(公式配布版は既定値を使用、ローカル開発ビルドのみ設定が必要) | [Discord Developer Portal](https://discord.com/developers/applications) で登録したアプリのクライアントID |
+| `TRAIN_LAUNCHER_DISCORD_CLIENT_SECRET` | 任意 | Discordアプリのクライアントシークレット(Developer Portal側の設定によっては不要。**デスクトップアプリのビルドに埋め込んでも実質的に秘匿できないため、この環境変数はビルド時埋め込みの対象にしていない**。本プロジェクトのDiscordアプリはclient_secret無しで動作することを確認済み) |
 | `TRAIN_LAUNCHER_DISCORD_CALLBACK_PORT` | 任意(デフォルト `38271`) | ローカルループバックリダイレクトサーバのポート番号。Discord Developer Portal の "Redirects" に `http://127.0.0.1:{ポート番号}/callback` を同じ値で事前登録しておく必要があります(Discordはワイルドカードポートを許可しないため) |
 
-例(PowerShellで `cargo tauri dev` の前に設定):
+例(PowerShellで、ローカル開発用に別のアプリ登録を試したい場合):
 ```powershell
 $env:TRAIN_LAUNCHER_MS_CLIENT_ID = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
 $env:TRAIN_LAUNCHER_DISCORD_CLIENT_ID = "123456789012345678"
 npm run dev
 ```
-
-> **注意**: この開発環境には実際のMicrosoft Entra ID / Discord Developer Portal のアプリ登録がないため、エンドツーエンドのサインイン動作確認は行えていません。ビルド成功・ユニットテスト(設定読み込み・URL構築ロジック)の確認までを実施済みです。実際の登録情報を用意できる環境で動作確認を行ってください。
 
 ### Mod / リソースパック導入機能を試すための環境変数
 
@@ -165,6 +163,7 @@ frontend/          # React + Vite + TypeScript + Fluent UI React v9 (`@fluentui/
 - アップデート成果物の署名用キーペアを生成済み(`npm run tauri -- signer generate`)。公開鍵は `apps/desktop/tauri.conf.json` の `plugins.updater.pubkey` に埋め込み済み
 - 秘密鍵とパスワードは、このリポジトリの GitHub Actions Secrets (`TAURI_SIGNING_PRIVATE_KEY` / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`) に設定済み。**秘密鍵はリポジトリのどこにもコミットしておらず、ローテーションする場合は鍵を再生成のうえSecretsと`pubkey`を両方更新する必要がある**
 - 本番TRAiN APIのベースURLは、このリポジトリの GitHub Actions Variables (`TRAIN_LAUNCHER_API_BASE_URL`、Settings > Secrets and variables > Actions > Variables タブ)に設定済み。リリースビルド時にこの値が `crates/train-api/src/lib.rs` の `DEFAULT_API_BASE_URL` へ埋め込まれ、一般ユーザーが環境変数を何も設定しなくても実データに接続できるようになる(値自体は秘匿情報ではないが、ソースコードへ直接ハードコードせず変更可能にするため変数化している)。この変数を変更した場合、既存のリリース済みバイナリには反映されないため、変更後に新しいバージョンをリリースし直す必要がある
+- MS/DiscordのクライアントIDも同様に GitHub Actions Variables (`TRAIN_LAUNCHER_MS_CLIENT_ID` / `TRAIN_LAUNCHER_DISCORD_CLIENT_ID`)に設定済み。リリースビルド時に `crates/auth/src/config.rs` の `DEFAULT_MS_CLIENT_ID` / `DEFAULT_DISCORD_CLIENT_ID` へ埋め込まれ、一般ユーザーが環境変数を何も設定しなくてもサインインできるようになる。いずれも公開クライアント向けのクライアントIDであり秘匿情報ではないためVariablesを使っている。**Discordのclient_secretはビルドに埋め込んでいない**(デスクトップアプリへ埋め込んでも実質的に秘匿できないため。本プロジェクトのDiscordアプリはclient_secret無しで動作することを確認済み)
 
 ## ステータス
 

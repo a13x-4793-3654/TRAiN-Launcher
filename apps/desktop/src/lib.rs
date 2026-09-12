@@ -245,13 +245,21 @@ fn list_profiles() -> Result<Vec<train_launcher_core::profile::Profile>, String>
 /// 新規プロファイルを作成する。同じIDが既に存在する場合はエラーを返す。
 #[tauri::command]
 fn create_profile(profile: train_launcher_core::profile::Profile) -> Result<(), String> {
-    train_launcher_core::profile::create_profile(profile).map_err(|err| err.to_string())
+    let id = profile.id.clone();
+    train_launcher_core::profile::create_profile(profile).map_err(|err| err.to_string())?;
+    // TRAiN管理プロファイルで `game_dir` が未指定の場合、専用の隔離フォルダを割り当てる
+    // (Mod・リソースパックがプロファイル間で混在しないようにするため)。
+    train_launcher_core::profile::ensure_isolated_game_dir(&id).map_err(|err| err.to_string())?;
+    Ok(())
 }
 
 /// 既存プロファイルを更新する。存在しないIDの場合はエラーを返す。
 #[tauri::command]
 fn update_profile(profile: train_launcher_core::profile::Profile) -> Result<(), String> {
-    train_launcher_core::profile::update_profile(profile).map_err(|err| err.to_string())
+    let id = profile.id.clone();
+    train_launcher_core::profile::update_profile(profile).map_err(|err| err.to_string())?;
+    train_launcher_core::profile::ensure_isolated_game_dir(&id).map_err(|err| err.to_string())?;
+    Ok(())
 }
 
 /// プロファイルを削除する。存在しないIDの場合はエラーを返す。
@@ -448,11 +456,14 @@ fn minecraft_root() -> std::path::PathBuf {
 /// `profile_id` が指定されている場合はそのプロファイルの
 /// [`train_launcher_core::profile::Profile::effective_game_dir`] を、未指定の場合は
 /// 全プロファイル共通の `.minecraft` 相当ディレクトリ([`minecraft_root`])を返す。
+/// `profile_id` 指定時は [`train_launcher_core::profile::ensure_isolated_game_dir`] を
+/// 経由するため、TRAiN管理プロファイルで `game_dir` が未指定であれば、この時点で専用の
+/// 隔離フォルダが割り当てられる(既に割り当て済みの場合は何もしない)。
 fn resolve_game_dir(profile_id: Option<&str>) -> Result<std::path::PathBuf, String> {
     match profile_id {
         Some(id) => {
-            let profile =
-                train_launcher_core::profile::get_profile(id).map_err(|err| err.to_string())?;
+            let profile = train_launcher_core::profile::ensure_isolated_game_dir(id)
+                .map_err(|err| err.to_string())?;
             Ok(profile.effective_game_dir(&minecraft_root()))
         }
         None => Ok(minecraft_root()),
@@ -963,8 +974,10 @@ async fn launch_profile(
 /// 指定プロファイルのMinecraftをダウンロード(未取得分のみ)した上で起動する。
 #[tauri::command]
 async fn launch_minecraft(app_handle: AppHandle, profile_id: String) -> Result<(), String> {
-    let profile =
-        train_launcher_core::profile::get_profile(&profile_id).map_err(|err| err.to_string())?;
+    // TRAiN管理プロファイルで `game_dir` が未指定であれば、専用の隔離フォルダを割り当てる
+    // (既存のMod・リソースパック管理ファイルがあれば併せて移行する)。
+    let profile = train_launcher_core::profile::ensure_isolated_game_dir(&profile_id)
+        .map_err(|err| err.to_string())?;
     launch_profile(app_handle, profile).await
 }
 
@@ -1083,19 +1096,20 @@ async fn join_train_server(
 
     // サーバーごとに固定のプロファイルIDを使う(再度参加した場合は同じプロファイルを更新し、
     // サーバー側の設定変更をそのまま反映する)。
-    // Mod・リソースパックは公式Minecraft Launcherと共有する `.minecraft` フォルダ
-    // (`game_dir: None` → `effective_game_dir` が共通ディレクトリへフォールバック)へ
-    // 直接インストールする。以前はサーバーごとに専用の隔離フォルダ
-    // (`server-profiles/<id>`)を割り当てていたが、公式ランチャー側からMod・
-    // リソースパックが全く見えなくなる問題があったため廃止した。同一フォルダを複数の
-    // TRAiNサーバーが共有することになるため、下記の「管理ファイル一覧による整理」で
-    // 他サーバー用ファイルとの混在を防ぐ。
+    // Mod・リソースパックはサーバーごとに専用の隔離フォルダ(`game_dir`)で管理する
+    // ([`train_launcher_core::profile::ensure_isolated_game_dir`]が下記の
+    // create_profile/update_profile呼び出し後に割り当てる)。以前はサーバーごとの隔離
+    // フォルダが公式ランチャー側からプロファイルごと見えなくなる問題があり一度廃止したが、
+    // 原因は「`launcher_profiles.json`への同期時点でフォルダの実体がまだ存在しない」
+    // ことだったと判明したため、`ensure_isolated_game_dir`側で同期前に必ずフォルダを
+    // 作成するよう修正した上で再度有効化した。
     let profile_id = format!("train-{server_id}");
     // 既存プロファイルがあれば、servers.dat上の同一エントリを判別するために前回登録した
     // アドレス・options.txt上で既に自動有効化済みのリソースパック一覧・前回インストールした
-    // 管理ファイル一覧を引き継ぐ(新規プロファイル作成時はいずれも空)。
+    // 管理ファイル一覧・割り当て済みの隔離フォルダを引き継ぐ(新規プロファイル作成時は
+    // いずれも空)。
     let previous_profile = train_launcher_core::profile::get_profile(&profile_id).ok();
-    let mut profile = Profile {
+    let profile = Profile {
         id: profile_id.clone(),
         name: server_name,
         minecraft_version: server_config.minecraft_version.clone(),
@@ -1104,7 +1118,9 @@ async fn join_train_server(
         // 常に最新の安定版を自動選択する。
         mod_loader_version: None,
         server_id: Some(server_id),
-        game_dir: None,
+        game_dir: previous_profile
+            .as_ref()
+            .and_then(|profile| profile.game_dir.clone()),
         java_path: None,
         max_memory_mb: None,
         source: ProfileSource::Train,
@@ -1132,35 +1148,57 @@ async fn join_train_server(
         }
         Err(err) => return Err(err.to_string()),
     }
+    // `game_dir` が未指定であれば専用の隔離フォルダを割り当てる(既存の管理ファイルが
+    // あれば移行する)。以降はこの呼び出しが返す(隔離フォルダ割り当て済みの)プロファイルを
+    // 使う。
+    let mut profile = train_launcher_core::profile::ensure_isolated_game_dir(&profile_id)
+        .map_err(|err| err.to_string())?;
 
     let profile_game_dir = profile.effective_game_dir(&minecraft_root());
 
-    // 共有フォルダを使う他のTRAiNプロファイル(=以前参加した別サーバー)が配置した
-    // Mod・リソースパックのうち、今回のサーバー設定で不要なものを削除する。
-    // このプロファイル自身についても、サーバー側でMod構成が変更され今回のURL一覧に
-    // 含まれなくなったファイルがあれば同様に削除する。判定は「管理ファイル一覧
-    // (`managed_mod_filenames`/`managed_resource_pack_filenames`)に記録されているか」
+    // このプロファイル自身について、サーバー側でMod構成が変更され今回のURL一覧に
+    // 含まれなくなったファイルがあれば、専用フォルダから削除する。判定は「管理ファイル
+    // 一覧(`managed_mod_filenames`/`managed_resource_pack_filenames`)に記録されているか」
     // のみで行うため、ユーザーが手動で追加したMod・独自の`game_dir`を指定している
     // プロファイルのファイルには一切触れない。
+    let keep_mod_filenames: std::collections::HashSet<String> = server_config
+        .mod_urls
+        .iter()
+        .map(|url| resolved_file_from_direct_url(url).filename)
+        .collect();
+    let keep_resource_pack_filenames: std::collections::HashSet<String> = server_config
+        .resource_pack_urls
+        .iter()
+        .map(|url| resolved_file_from_direct_url(url).filename)
+        .collect();
+    profile.managed_mod_filenames = prune_stale_managed_files(
+        &profile.managed_mod_filenames,
+        &keep_mod_filenames,
+        &profile_game_dir.join("mods"),
+    )
+    .await;
+    profile.managed_resource_pack_filenames = prune_stale_managed_files(
+        &profile.managed_resource_pack_filenames,
+        &keep_resource_pack_filenames,
+        &profile_game_dir.join("resourcepacks"),
+    )
+    .await;
+
+    // まだ専用フォルダへ移行していない(`game_dir`が未指定のままの)他のTRAiNプロファイルが、
+    // 公式Minecraft Launcherと共有する `.minecraft` フォルダに配置したまま残している
+    // Mod・リソースパックを掃除する(そのプロファイル自身が次回参加/起動時に専用フォルダへ
+    // 移行されるまでの経過的な処理。このプロファイル自身は既に専用フォルダへ移行済みのため
+    // 対象外)。
     {
-        let keep_mod_filenames: std::collections::HashSet<String> = server_config
-            .mod_urls
-            .iter()
-            .map(|url| resolved_file_from_direct_url(url).filename)
-            .collect();
-        let keep_resource_pack_filenames: std::collections::HashSet<String> = server_config
-            .resource_pack_urls
-            .iter()
-            .map(|url| resolved_file_from_direct_url(url).filename)
-            .collect();
+        let shared_root = minecraft_root();
+        let shared_mods_dir = shared_root.join("mods");
+        let shared_resourcepacks_dir = shared_root.join("resourcepacks");
         let empty_keep_set: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let mods_dir = profile_game_dir.join("mods");
-        let resourcepacks_dir = profile_game_dir.join("resourcepacks");
 
         match train_launcher_core::profile::list_profiles() {
             Ok(all_profiles) => {
                 for mut other in all_profiles {
-                    if other.source != ProfileSource::Train {
+                    if other.source != ProfileSource::Train || other.id == profile.id {
                         continue;
                     }
                     let uses_shared_dir = other
@@ -1172,18 +1210,16 @@ async fn join_train_server(
                     if !uses_shared_dir {
                         continue;
                     }
-                    let (keep_mods, keep_packs) = if other.id == profile.id {
-                        (&keep_mod_filenames, &keep_resource_pack_filenames)
-                    } else {
-                        (&empty_keep_set, &empty_keep_set)
-                    };
-                    let pruned_mods =
-                        prune_stale_managed_files(&other.managed_mod_filenames, keep_mods, &mods_dir)
-                            .await;
+                    let pruned_mods = prune_stale_managed_files(
+                        &other.managed_mod_filenames,
+                        &empty_keep_set,
+                        &shared_mods_dir,
+                    )
+                    .await;
                     let pruned_packs = prune_stale_managed_files(
                         &other.managed_resource_pack_filenames,
-                        keep_packs,
-                        &resourcepacks_dir,
+                        &empty_keep_set,
+                        &shared_resourcepacks_dir,
                     )
                     .await;
                     if pruned_mods.len() != other.managed_mod_filenames.len()

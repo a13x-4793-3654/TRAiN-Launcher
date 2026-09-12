@@ -125,6 +125,11 @@ const useStyles = makeStyles({
     flexShrink: 0,
     whiteSpace: "nowrap",
   },
+  // お知らせ本文の改行(\n)をそのまま画面に反映させるため、
+  // デフォルトのwhite-space: normalによる改行の空白化を防ぐ。
+  announcementBody: {
+    whiteSpace: "pre-wrap",
+  },
 });
 
 const dateTimeFormatter = new Intl.DateTimeFormat("ja-JP", {
@@ -375,7 +380,7 @@ export function HomePage({ onNavigate }: { onNavigate: (key: NavKey) => void }) 
                     </div>
                   }
                 />
-                <Body1 as="p" block>
+                <Body1 as="p" block className={styles.announcementBody}>
                   {announcement.body}
                 </Body1>
               </Card>

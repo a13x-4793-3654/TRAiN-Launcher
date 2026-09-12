@@ -151,11 +151,15 @@ fn load_all() -> Result<Vec<Profile>, CoreError> {
 }
 
 fn save_all(profiles: &[Profile]) -> Result<(), CoreError> {
+    use std::io::Write;
+
     let path = profiles_file_path();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(&path, serde_json::to_vec_pretty(profiles)?)?;
+    let parent = default_launcher_root();
+    std::fs::create_dir_all(&parent)?;
+    let mut file = tempfile::Builder::new().prefix(".profiles-").tempfile_in(&parent)?;
+    file.write_all(&serde_json::to_vec_pretty(profiles)?)?;
+    file.as_file().sync_all()?;
+    file.persist(&path).map_err(|err| err.error)?;
     Ok(())
 }
 
@@ -267,6 +271,28 @@ pub fn update_profile(profile: Profile) -> Result<(), CoreError> {
     save_all(&profiles)?;
     sync_to_official_launcher(&profile);
     Ok(())
+}
+
+/// Restore game-file bookkeeping without changing launch preferences or the
+/// official launcher's profile file.
+pub fn save_game_state(profile: &Profile) -> Result<(), CoreError> {
+    let mut profiles = load_all()?;
+    let index = match profiles.iter().position(|current| current.id == profile.id) {
+        Some(index) => index,
+        None => {
+            profiles.push(get_profile(&profile.id)?);
+            profiles.len() - 1
+        }
+    };
+    copy_game_state(&mut profiles[index], profile);
+    save_all(&profiles)
+}
+
+fn copy_game_state(target: &mut Profile, source: &Profile) {
+    target.managed_mod_filenames.clone_from(&source.managed_mod_filenames);
+    target.managed_resource_pack_filenames.clone_from(&source.managed_resource_pack_filenames);
+    target.enabled_resource_packs.clone_from(&source.enabled_resource_packs);
+    target.last_server_address.clone_from(&source.last_server_address);
 }
 
 /// プロファイルを削除する。TRAiN側・公式ランチャー側のどちらか一方にのみ存在する場合も
@@ -435,6 +461,28 @@ pub fn mark_launched(id: &str) -> Result<(), CoreError> {
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn restored_game_state_does_not_replace_launch_preferences() {
+        let mut target = sample_profile(Some("target-game"));
+        target.java_path = Some("chosen-java".to_string());
+        target.max_memory_mb = Some(8192);
+        let mut source = sample_profile(Some("other-game"));
+        source.id = "other-profile".to_string();
+        source.name = "other-name".to_string();
+        source.minecraft_version = "other-version".to_string();
+        source.managed_mod_filenames = vec!["restored-mod.jar".to_string()];
+        source.enabled_resource_packs = vec!["file/restored-pack.zip".to_string()];
+        copy_game_state(&mut target, &source);
+        assert_eq!(target.id, "test");
+        assert_eq!(target.name, "test");
+        assert_eq!(target.minecraft_version, "1.20.4");
+        assert_eq!(target.game_dir.as_deref(), Some("target-game"));
+        assert_eq!(target.java_path.as_deref(), Some("chosen-java"));
+        assert_eq!(target.max_memory_mb, Some(8192));
+        assert_eq!(target.managed_mod_filenames, source.managed_mod_filenames);
+        assert_eq!(target.enabled_resource_packs, source.enabled_resource_packs);
+    }
 
     fn sample_profile(game_dir: Option<&str>) -> Profile {
         Profile {

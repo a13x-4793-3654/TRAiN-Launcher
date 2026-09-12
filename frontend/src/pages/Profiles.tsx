@@ -35,11 +35,13 @@ import {
   DeleteRegular,
   PlayRegular,
   FolderOpenRegular,
+  ArrowDownloadRegular,
 } from "@fluentui/react-icons";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useLaunchStatus } from "../LaunchStatus";
+import { ImportSettingsDialog } from "./ImportSettingsDialog";
 
 const TOASTER_ID = "profiles-toaster";
 const GAME_EXITED_EVENT = "game://exited";
@@ -57,6 +59,10 @@ interface Profile {
   max_memory_mb: number | null;
   source: "train" | "official";
   last_launched_at: string | null;
+  last_server_address: string | null;
+  enabled_resource_packs: string[];
+  managed_mod_filenames: string[];
+  managed_resource_pack_filenames: string[];
 }
 
 interface VersionEntry {
@@ -105,6 +111,7 @@ interface ProfileFormState {
   maxMemoryMb: string;
   // 編集時に既存の最終起動日時を保持したまま保存するための値(フォーム上には表示しない)。
   lastLaunchedAt: string | null;
+  originalProfile: Profile | null;
 }
 
 const EMPTY_FORM: ProfileFormState = {
@@ -117,6 +124,7 @@ const EMPTY_FORM: ProfileFormState = {
   javaPath: "",
   maxMemoryMb: "",
   lastLaunchedAt: null,
+  originalProfile: null,
 };
 
 const useStyles = makeStyles({
@@ -137,6 +145,9 @@ const useStyles = makeStyles({
     gap: tokens.spacingHorizontalXS,
     flexShrink: 0,
     whiteSpace: "nowrap",
+    flexWrap: "wrap",
+    justifyContent: "flex-end",
+    maxWidth: "320px",
   },
   progressArea: {
     display: "flex",
@@ -201,6 +212,7 @@ export function ProfilesPage() {
   );
   const [deleteTarget, setDeleteTarget] = useState<Profile | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [importTarget, setImportTarget] = useState<Profile | null>(null);
 
   const refreshProfiles = () => {
     setProfilesLoading(true);
@@ -297,6 +309,7 @@ export function ProfilesPage() {
       maxMemoryMb:
         profile.max_memory_mb != null ? String(profile.max_memory_mb) : "",
       lastLaunchedAt: profile.last_launched_at,
+      originalProfile: profile,
     });
     setDialogOpen(true);
     ensureVersionsLoaded();
@@ -358,7 +371,7 @@ export function ProfilesPage() {
         form.modLoader === NO_MOD_LOADER
           ? null
           : form.modLoaderVersion.trim() || null,
-      server_id: null,
+      server_id: form.originalProfile?.server_id ?? null,
       game_dir: form.gameDir.trim() || null,
       java_path: form.javaPath.trim() || null,
       max_memory_mb: maxMemoryMb,
@@ -366,6 +379,10 @@ export function ProfilesPage() {
       // (公式ランチャー由来のプロファイルを編集した場合も、この操作でTRAiN側に取り込まれる)。
       source: "train",
       last_launched_at: form.lastLaunchedAt,
+      last_server_address: form.originalProfile?.last_server_address ?? null,
+      enabled_resource_packs: form.originalProfile?.enabled_resource_packs ?? [],
+      managed_mod_filenames: form.originalProfile?.managed_mod_filenames ?? [],
+      managed_resource_pack_filenames: form.originalProfile?.managed_resource_pack_filenames ?? [],
     };
 
     setSaving(true);
@@ -540,6 +557,15 @@ export function ProfilesPage() {
                     <Button
                       appearance="subtle"
                       size="small"
+                      icon={<ArrowDownloadRegular />}
+                      disabled={launchingId !== null}
+                      onClick={() => setImportTarget(profile)}
+                    >
+                      設定を取り込む
+                    </Button>
+                    <Button
+                      appearance="subtle"
+                      size="small"
                       icon={<DeleteRegular />}
                       disabled={launchingId !== null}
                       onClick={() => handleDelete(profile)}
@@ -564,6 +590,14 @@ export function ProfilesPage() {
             </Card>
           ))}
         </div>
+      )}
+
+      {importTarget && (
+        <ImportSettingsDialog
+          target={importTarget}
+          onClose={() => setImportTarget(null)}
+          onImported={refreshProfiles}
+        />
       )}
 
       <Dialog

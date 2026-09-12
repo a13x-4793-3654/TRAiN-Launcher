@@ -3,7 +3,9 @@
 //! プロファイル管理、Minecraftバージョンマニフェスト/ライブラリ/アセットのダウンロード、
 //! 起動コマンドの構築を担当するコアクレート。
 
+pub mod backup;
 pub mod download;
+pub mod game_settings;
 pub mod java;
 mod java_download;
 pub mod launch;
@@ -54,6 +56,10 @@ mod error {
         JavaRuntime(String),
         #[error("{0}")]
         JavaNotFound(String),
+        #[error("{0}")]
+        GameSettings(String),
+        #[error("{0}")]
+        Backup(String),
         #[error("profile not found: {0}")]
         ProfileNotFound(String),
         #[error("profile already exists: {0}")]

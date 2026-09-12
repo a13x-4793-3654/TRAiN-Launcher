@@ -21,6 +21,7 @@ import {
   PersonRegular,
   AppsRegular,
   SettingsRegular,
+  ArchiveRegular,
 } from "@fluentui/react-icons";
 import { invoke } from "@tauri-apps/api/core";
 import { useSystemTheme } from "./useSystemTheme";
@@ -28,11 +29,13 @@ import { trainLightTheme, trainDarkTheme } from "./theme";
 import { HomePage } from "./pages/Home";
 import { ServersPage } from "./pages/Servers";
 import { ProfilesPage } from "./pages/Profiles";
+import { BackupsPage } from "./pages/Backups";
 import { ModsPage } from "./pages/Mods";
 import { SettingsPage } from "./pages/Settings";
 import { LaunchStatusProvider, LaunchingModal } from "./LaunchStatus";
 import { AppUpdateProvider, useAppUpdate } from "./AppUpdate";
 import { UpdateBanner } from "./UpdateBanner";
+import { GameDataOperationModal } from "./GameActivity";
 
 const TOASTER_ID = "train-launcher-toaster";
 
@@ -97,7 +100,7 @@ const useStyles = makeStyles({
   },
 });
 
-type NavKey = "home" | "servers" | "profiles" | "mods" | "settings";
+type NavKey = "home" | "servers" | "profiles" | "mods" | "backups" | "settings";
 export type { NavKey };
 
 // 「所属サーバー詳細」は`ServersPage`内のサブ画面(`ServerDetail.tsx`)として、
@@ -257,6 +260,9 @@ function AppShell() {
             <Tab value="mods" icon={<AppsRegular />}>
               Mod / リソースパック
             </Tab>
+            <Tab value="backups" icon={<ArchiveRegular />}>
+              バックアップ
+            </Tab>
             <Tab value="settings" icon={<SettingsRegular />}>
               設定
             </Tab>
@@ -267,11 +273,13 @@ function AppShell() {
           {selected === "servers" && <ServersPage />}
           {selected === "profiles" && <ProfilesPage />}
           {selected === "mods" && <ModsPage />}
+          {selected === "backups" && <BackupsPage />}
           {selected === "settings" && <SettingsPage />}
         </main>
       </div>
       <Toaster toasterId={TOASTER_ID} />
       <LaunchingModal />
+      <GameDataOperationModal />
     </div>
   );
 }

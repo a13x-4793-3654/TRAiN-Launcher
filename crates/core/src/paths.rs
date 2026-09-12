@@ -113,10 +113,31 @@ pub fn default_launcher_root() -> PathBuf {
 /// ([`crate::profile::ensure_isolated_game_dir`]参照)。Minecraftのバージョン・
 /// Modローダーが異なるプロファイル同士でMod・リソースパックが混在して動作しなくなることを
 /// 防ぐため、プロファイルごとに専用のフォルダを使う。
+///
+/// `profile_id` がそのまま安全な単一パス要素として使える場合(区切り文字や `..` を
+/// 含まない通常のUUID・`train-<server_id>` 形式等)はそれをそのままフォルダ名に使う。
+/// そうでない場合、[`safe_path_component`]のように固定の代替名(`_invalid_`)へ
+/// 丸めてしまうと、区切り文字を含む異なる複数のプロファイルIDが同じフォルダに
+/// 割り当てられてしまい、それらのプロファイル間でMod・リソースパック・セーブデータが
+/// 混在してしまう(隔離が壊れる)。これを防ぐため、安全な単一パス要素にできない場合は
+/// `profile_id` のバイト列をそのまま16進数エンコードし、常に一意な単一パス要素になる
+/// ようにする。
 pub fn profile_game_dir(profile_id: &str) -> PathBuf {
-    default_launcher_root()
-        .join("profiles")
-        .join(safe_path_component(profile_id))
+    let is_safe_component = !profile_id.is_empty()
+        && profile_id != "."
+        && profile_id != ".."
+        && !profile_id.contains(['/', '\\']);
+    let component = if is_safe_component {
+        profile_id.to_string()
+    } else {
+        let encoded: String = profile_id
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        format!("id-{encoded}")
+    };
+    default_launcher_root().join("profiles").join(component)
 }
 
 /// 公式Minecraft Launcherが使用するゲームデータディレクトリ(`.minecraft` 相当)。
@@ -214,6 +235,22 @@ mod tests {
             dir,
             default_launcher_root().join("profiles").join("train-abc123")
         );
+    }
+
+    #[test]
+    fn profile_game_dir_disambiguates_different_unsafe_ids() {
+        // 区切り文字を含む(安全な単一パス要素にできない)異なるIDが、固定の
+        // フォールバック名(`_invalid_`)へ丸められて同じフォルダに衝突しないこと。
+        let dir_a = profile_game_dir("train/a");
+        let dir_b = profile_game_dir("train/b");
+        assert_ne!(dir_a, dir_b);
+    }
+
+    #[test]
+    fn profile_game_dir_is_deterministic_for_unsafe_ids() {
+        let dir_a = profile_game_dir("train/a");
+        let dir_b = profile_game_dir("train/a");
+        assert_eq!(dir_a, dir_b);
     }
 }
 

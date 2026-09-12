@@ -8,8 +8,13 @@ name: Release
 #
 # 事前準備:
 # - リポジトリの Settings > Secrets and variables > Actions に以下を設定済み:
-#   - `TAURI_SIGNING_PRIVATE_KEY` (アップデーター署名用秘密鍵。`npm run tauri -- signer generate`で生成)
-#   - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` (上記秘密鍵のパスワード)
+#   - Secrets: `TAURI_SIGNING_PRIVATE_KEY` (アップデーター署名用秘密鍵。
+#     `npm run tauri -- signer generate`で生成) / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`
+#     (上記秘密鍵のパスワード)
+#   - Variables: `TRAIN_LAUNCHER_API_BASE_URL` (本番TRAiN APIのベースURL。ビルド時に
+#     `crates/train-api/src/lib.rs` の `DEFAULT_API_BASE_URL` へ埋め込まれ、一般ユーザーが
+#     環境変数を何も設定しなくても実データに接続できるようにする。未設定の場合、ビルドされる
+#     ランチャーはモック実装にフォールバックする)
 # - リリース前に `apps/desktop/tauri.conf.json` の `version` (と `Cargo.toml` の
 #   `workspace.package.version`) を新しいバージョンへ更新し、mainへマージしておくこと。
 on:
@@ -69,6 +74,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          TRAIN_LAUNCHER_DEFAULT_API_BASE_URL: ${{ vars.TRAIN_LAUNCHER_API_BASE_URL }}
         with:
           projectPath: apps/desktop
           updaterJsonPreferNsis: true

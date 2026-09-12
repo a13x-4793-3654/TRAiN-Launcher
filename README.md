@@ -107,11 +107,11 @@ npm run dev
 
 ### TRAiN 独自バックエンドAPIを試すための環境変数
 
-TRAiN側のAPI仕様は確定済みです(TRAiNリポジトリの `docs/LAUNCHER-API.md` 参照)。配布版(リリースビルド)は環境変数を何も設定しなくても本番のTRAiN API(`https://train.alex-infosys.info`、[`DEFAULT_API_BASE_URL`](crates/train-api/src/lib.rs))へ既定で接続します。以下の環境変数は、ローカル開発時に接続先を切り替えたい場合のみ設定してください。
+TRAiN側のAPI仕様は確定済みです(TRAiNリポジトリの `docs/LAUNCHER-API.md` 参照)。公式配布版(GitHub Releasesのビルド)は、リリースCI(`.github/workflows/release.yml`)がGitHub Actionsのリポジトリ変数 `TRAIN_LAUNCHER_API_BASE_URL` からビルド時に本番TRAiN APIのURLを埋め込むため、一般ユーザーは環境変数を何も設定しなくても実データに接続できます([`DEFAULT_API_BASE_URL`](crates/train-api/src/lib.rs)、詳細は下記「リリース手順」参照)。ローカル開発ビルド(この変数を設定せずに`cargo build`/`npm run dev`した場合)はこの既定値が空になるため、以下の**実行時**環境変数を設定しない限りモック実装(`MockTrainApiClient`)にフォールバックします。
 
 | 環境変数 | 必須 | 説明 |
 | --- | --- | --- |
-| `TRAIN_LAUNCHER_API_BASE_URL` | 任意(未設定時は本番TRAiN APIを使用) | TRAiN APIのベースURL(例: `https://train.example.com`)を上書きする場合に指定する。値として `mock`(大文字小文字は区別しない)を指定すると、常にダミーデータを返すモック実装(`MockTrainApiClient`)を強制的に使用する。認証はDiscordアクセストークンをBearerとして送るだけでよく(TRAiN側がDiscord APIへ問い合わせて本人確認する)、追加設定は不要 |
+| `TRAIN_LAUNCHER_API_BASE_URL` | 任意(公式配布版は未設定時も本番TRAiN APIを使用。ローカル開発ビルドは未設定時はモック実装を使用) | TRAiN APIのベースURL(例: `https://train.example.com`)を指定/上書きする。値として `mock`(大文字小文字は区別しない)を指定すると、常にダミーデータを返すモック実装(`MockTrainApiClient`)を強制的に使用する。認証はDiscordアクセストークンをBearerとして送るだけでよく(TRAiN側がDiscord APIへ問い合わせて本人確認する)、追加設定は不要 |
 
 お知らせ機能(`GET {base}/api/announcements` / `GET {base}/api/servers/{server_id}/announcements`)も同じ `TRAIN_LAUNCHER_API_BASE_URL` を使うため、新しい環境変数は不要です。
 
@@ -164,6 +164,7 @@ frontend/          # React + Vite + TypeScript + Fluent UI React v9 (`@fluentui/
 
 - アップデート成果物の署名用キーペアを生成済み(`npm run tauri -- signer generate`)。公開鍵は `apps/desktop/tauri.conf.json` の `plugins.updater.pubkey` に埋め込み済み
 - 秘密鍵とパスワードは、このリポジトリの GitHub Actions Secrets (`TAURI_SIGNING_PRIVATE_KEY` / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`) に設定済み。**秘密鍵はリポジトリのどこにもコミットしておらず、ローテーションする場合は鍵を再生成のうえSecretsと`pubkey`を両方更新する必要がある**
+- 本番TRAiN APIのベースURLは、このリポジトリの GitHub Actions Variables (`TRAIN_LAUNCHER_API_BASE_URL`、Settings > Secrets and variables > Actions > Variables タブ)に設定済み。リリースビルド時にこの値が `crates/train-api/src/lib.rs` の `DEFAULT_API_BASE_URL` へ埋め込まれ、一般ユーザーが環境変数を何も設定しなくても実データに接続できるようになる(値自体は秘匿情報ではないが、ソースコードへ直接ハードコードせず変更可能にするため変数化している)。この変数を変更した場合、既存のリリース済みバイナリには反映されないため、変更後に新しいバージョンをリリースし直す必要がある
 
 ## ステータス
 

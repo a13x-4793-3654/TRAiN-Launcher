@@ -297,8 +297,9 @@ async fn list_mod_loader_versions(
 
 /// Discordサインイン後の所属サーバー一覧を取得する。
 ///
-/// 環境変数 `TRAIN_LAUNCHER_API_BASE_URL` が設定されていれば実際のTRAiN APIへ、未設定なら
-/// モック実装(`MockTrainApiClient`)へフォールバックする(`train_launcher_server_api::create_client`)。
+/// 既定では本番TRAiN APIへ接続する。環境変数 `TRAIN_LAUNCHER_API_BASE_URL` で接続先を
+/// 上書きでき、`mock` を指定するとモック実装(`MockTrainApiClient`)を強制できる
+/// (`train_launcher_server_api::create_client`)。
 #[tauri::command]
 async fn list_member_servers() -> Result<Vec<train_launcher_server_api::MemberServer>, String> {
     let discord_token = store::load_token(Provider::Discord)

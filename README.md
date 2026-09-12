@@ -107,17 +107,23 @@ npm run dev
 
 ### TRAiN 独自バックエンドAPIを試すための環境変数
 
-TRAiN側のAPI仕様は確定済みです(TRAiNリポジトリの `docs/LAUNCHER-API.md` 参照)。以下の環境変数が未設定の場合、常にダミーデータを返すモック実装(`MockTrainApiClient`)にフォールバックします。実際のTRAiNバックエンド(Webサーバー機能が有効なもの)が用意できた場合に設定してください。
+TRAiN側のAPI仕様は確定済みです(TRAiNリポジトリの `docs/LAUNCHER-API.md` 参照)。配布版(リリースビルド)は環境変数を何も設定しなくても本番のTRAiN API(`https://train.alex-infosys.info`、[`DEFAULT_API_BASE_URL`](crates/train-api/src/lib.rs))へ既定で接続します。以下の環境変数は、ローカル開発時に接続先を切り替えたい場合のみ設定してください。
 
 | 環境変数 | 必須 | 説明 |
 | --- | --- | --- |
-| `TRAIN_LAUNCHER_API_BASE_URL` | 任意(未設定時はモック実装を使用) | TRAiN APIのベースURL(例: `https://train.example.com`)。設定すると、`GET {base}/api/members/{discord_user_id}/servers` / `GET {base}/api/servers/{server_id}/config` へリクエストする実HTTPクライアント(`HttpTrainApiClient`)を使用します。認証はDiscordアクセストークンをBearerとして送るだけでよく(TRAiN側がDiscord APIへ問い合わせて本人確認する)、追加設定は不要です |
+| `TRAIN_LAUNCHER_API_BASE_URL` | 任意(未設定時は本番TRAiN APIを使用) | TRAiN APIのベースURL(例: `https://train.example.com`)を上書きする場合に指定する。値として `mock`(大文字小文字は区別しない)を指定すると、常にダミーデータを返すモック実装(`MockTrainApiClient`)を強制的に使用する。認証はDiscordアクセストークンをBearerとして送るだけでよく(TRAiN側がDiscord APIへ問い合わせて本人確認する)、追加設定は不要 |
 
-お知らせ機能(`GET {base}/api/announcements` / `GET {base}/api/servers/{server_id}/announcements`)も同じ `TRAIN_LAUNCHER_API_BASE_URL` を使うため、新しい環境変数は不要です。未設定時は `MockTrainApiClient` がダミーのお知らせを返します。
+お知らせ機能(`GET {base}/api/announcements` / `GET {base}/api/servers/{server_id}/announcements`)も同じ `TRAIN_LAUNCHER_API_BASE_URL` を使うため、新しい環境変数は不要です。
 
-例(PowerShellで `cargo tauri dev` の前に設定):
+例(PowerShellで、ローカルの開発用TRAiNバックエンドへ向けたい場合):
 ```powershell
-$env:TRAIN_LAUNCHER_API_BASE_URL = "https://api.train.example.com"
+$env:TRAIN_LAUNCHER_API_BASE_URL = "http://localhost:8787"
+npm run dev
+```
+
+例(モック実装を強制したい場合):
+```powershell
+$env:TRAIN_LAUNCHER_API_BASE_URL = "mock"
 npm run dev
 ```
 

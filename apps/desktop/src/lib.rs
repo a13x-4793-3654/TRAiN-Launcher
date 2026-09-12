@@ -11,10 +11,15 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, WebviewUrl, WebviewWindowBuilder, WindowEvent};
+use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use tauri_plugin_opener::OpenerExt;
 use train_launcher_auth::store::{self, Provider, TokenRecord};
 use train_launcher_auth::{config, discord, msa, xbox};
+
+mod game_activity;
+mod game_data;
+
+use game_activity::GameActivity;
 
 /// フロントエンドへ返すサインイン結果。
 #[derive(Debug, Clone, Serialize)]
@@ -231,8 +236,10 @@ fn get_app_settings() -> Result<train_launcher_core::settings::AppSettings, Stri
 /// アプリ全体の設定を保存する。
 #[tauri::command]
 fn save_app_settings(
+    app_handle: AppHandle,
     settings: train_launcher_core::settings::AppSettings,
 ) -> Result<(), String> {
+    let _activity = app_handle.state::<GameActivity>().begin_file_operation()?;
     train_launcher_core::settings::save_settings(&settings).map_err(|err| err.to_string())
 }
 
@@ -244,7 +251,8 @@ fn list_profiles() -> Result<Vec<train_launcher_core::profile::Profile>, String>
 
 /// 新規プロファイルを作成する。同じIDが既に存在する場合はエラーを返す。
 #[tauri::command]
-fn create_profile(profile: train_launcher_core::profile::Profile) -> Result<(), String> {
+fn create_profile(app_handle: AppHandle, profile: train_launcher_core::profile::Profile) -> Result<(), String> {
+    let _activity = app_handle.state::<GameActivity>().begin_file_operation()?;
     let id = profile.id.clone();
     train_launcher_core::profile::create_profile(profile).map_err(|err| err.to_string())?;
     // TRAiN管理プロファイルで `game_dir` が未指定の場合、専用の隔離フォルダを割り当てる
@@ -255,7 +263,8 @@ fn create_profile(profile: train_launcher_core::profile::Profile) -> Result<(), 
 
 /// 既存プロファイルを更新する。存在しないIDの場合はエラーを返す。
 #[tauri::command]
-fn update_profile(profile: train_launcher_core::profile::Profile) -> Result<(), String> {
+fn update_profile(app_handle: AppHandle, profile: train_launcher_core::profile::Profile) -> Result<(), String> {
+    let _activity = app_handle.state::<GameActivity>().begin_file_operation()?;
     let id = profile.id.clone();
     train_launcher_core::profile::update_profile(profile).map_err(|err| err.to_string())?;
     train_launcher_core::profile::ensure_isolated_game_dir(&id).map_err(|err| err.to_string())?;
@@ -264,7 +273,8 @@ fn update_profile(profile: train_launcher_core::profile::Profile) -> Result<(), 
 
 /// プロファイルを削除する。存在しないIDの場合はエラーを返す。
 #[tauri::command]
-fn delete_profile(id: String) -> Result<(), String> {
+fn delete_profile(app_handle: AppHandle, id: String) -> Result<(), String> {
+    let _activity = app_handle.state::<GameActivity>().begin_file_operation()?;
     train_launcher_core::profile::delete_profile(&id).map_err(|err| err.to_string())
 }
 
@@ -460,14 +470,30 @@ fn minecraft_root() -> std::path::PathBuf {
 /// 経由するため、TRAiN管理プロファイルで `game_dir` が未指定であれば、この時点で専用の
 /// 隔離フォルダが割り当てられる(既に割り当て済みの場合は何もしない)。
 fn resolve_game_dir(profile_id: Option<&str>) -> Result<std::path::PathBuf, String> {
-    match profile_id {
+    let root = game_data::shared_root()?;
+    let current = read_game_dir(profile_id)?;
+    train_launcher_core::backup::ensure_restore_complete(&current).map_err(|err| err.to_string())?;
+    let directory = match profile_id {
         Some(id) => {
             let profile = train_launcher_core::profile::ensure_isolated_game_dir(id)
                 .map_err(|err| err.to_string())?;
-            Ok(profile.effective_game_dir(&minecraft_root()))
+            profile.effective_game_dir(&root)
         }
-        None => Ok(minecraft_root()),
-    }
+        None => root,
+    };
+    train_launcher_core::backup::ensure_restore_complete(&directory).map_err(|err| err.to_string())?;
+    Ok(directory)
+}
+
+fn read_game_dir(profile_id: Option<&str>) -> Result<std::path::PathBuf, String> {
+    let root = game_data::shared_root()?;
+    let directory = match profile_id {
+        Some(id) => train_launcher_core::profile::get_profile(id)
+            .map_err(|err| err.to_string())?.effective_game_dir(&root),
+        None => root,
+    };
+    train_launcher_core::backup::ensure_restore_complete(&directory).map_err(|err| err.to_string())?;
+    Ok(directory)
 }
 
 /// 指定ディレクトリ内のファイル名一覧を返す(ディレクトリが存在しない場合は空リスト)。
@@ -587,12 +613,14 @@ async fn resolve_mod_urls(
 /// ([`resolve_game_dir`])。
 #[tauri::command]
 async fn install_mods(
+    app_handle: AppHandle,
     urls: Vec<String>,
     minecraft_version: Option<String>,
     profile_id: Option<String>,
 ) -> Result<Vec<String>, String> {
     use train_launcher_mods::resolver::download_resolved_file;
 
+    let _activity = app_handle.state::<GameActivity>().begin_file_operation()?;
     let merged = resolve_mod_urls_merged(&urls, minecraft_version.as_deref()).await?;
     let dest_dir = resolve_game_dir(profile_id.as_deref())?.join("mods");
     let mut installed = Vec::new();
@@ -612,6 +640,7 @@ async fn install_mods(
 /// ([`resolve_game_dir`])。
 #[tauri::command]
 async fn install_mod(
+    app_handle: AppHandle,
     url: String,
     minecraft_version: Option<String>,
     profile_id: Option<String>,
@@ -620,6 +649,7 @@ async fn install_mod(
         download_resolved_file, resolve_dependencies, ModReference, ResolveFilter,
     };
 
+    let _activity = app_handle.state::<GameActivity>().begin_file_operation()?;
     let filter = ResolveFilter {
         minecraft_version,
         mod_loader: None,
@@ -647,7 +677,7 @@ async fn install_mod(
 /// `profile_id` 省略時は全プロファイル共通のディレクトリを参照する。
 #[tauri::command]
 async fn list_installed_mods(profile_id: Option<String>) -> Result<Vec<String>, String> {
-    let dir = resolve_game_dir(profile_id.as_deref())?.join("mods");
+    let dir = read_game_dir(profile_id.as_deref())?.join("mods");
     list_directory_files(&dir).await
 }
 
@@ -655,9 +685,11 @@ async fn list_installed_mods(profile_id: Option<String>) -> Result<Vec<String>, 
 /// 参照する。
 #[tauri::command]
 async fn remove_installed_mod(
+    app_handle: AppHandle,
     filename: String,
     profile_id: Option<String>,
 ) -> Result<(), String> {
+    let _activity = app_handle.state::<GameActivity>().begin_file_operation()?;
     let dir = resolve_game_dir(profile_id.as_deref())?.join("mods");
     remove_installed_file(&dir, &filename).await
 }
@@ -669,10 +701,12 @@ async fn remove_installed_mod(
 /// インストールする([`resolve_game_dir`])。
 #[tauri::command]
 async fn install_resource_pack(
+    app_handle: AppHandle,
     url: String,
     minecraft_version: Option<String>,
     profile_id: Option<String>,
 ) -> Result<String, String> {
+    let _activity = app_handle.state::<GameActivity>().begin_file_operation()?;
     let dest_dir = resolve_game_dir(profile_id.as_deref())?.join("resourcepacks");
     let path = train_launcher_mods::resource_pack::install_from_url(
         &url,
@@ -696,7 +730,7 @@ async fn install_resource_pack(
 async fn list_installed_resource_packs(
     profile_id: Option<String>,
 ) -> Result<Vec<String>, String> {
-    let dir = resolve_game_dir(profile_id.as_deref())?.join("resourcepacks");
+    let dir = read_game_dir(profile_id.as_deref())?.join("resourcepacks");
     list_directory_files(&dir).await
 }
 
@@ -704,9 +738,11 @@ async fn list_installed_resource_packs(
 /// ディレクトリを参照する。
 #[tauri::command]
 async fn remove_installed_resource_pack(
+    app_handle: AppHandle,
     filename: String,
     profile_id: Option<String>,
 ) -> Result<(), String> {
+    let _activity = app_handle.state::<GameActivity>().begin_file_operation()?;
     let dir = resolve_game_dir(profile_id.as_deref())?.join("resourcepacks");
     remove_installed_file(&dir, &filename).await
 }
@@ -840,10 +876,14 @@ async fn ensure_valid_microsoft_token() -> Result<TokenRecord, String> {
 async fn launch_profile(
     app_handle: AppHandle,
     profile: train_launcher_core::profile::Profile,
+    activity: game_activity::ActivityLease,
 ) -> Result<(), String> {
     let mut profile = profile;
     let settings = train_launcher_core::settings::load_settings()
         .map_err(|err| format!("Javaの起動設定を読み込めませんでした: {err}"))?;
+    let launcher_root = train_launcher_core::paths::effective_minecraft_root(settings.game_directory.as_deref());
+    train_launcher_core::backup::ensure_restore_complete(&profile.effective_game_dir(&launcher_root))
+        .map_err(|err| err.to_string())?;
     let preferred_java_paths: Vec<String> = profile
         .java_path
         .iter()
@@ -863,7 +903,6 @@ async fn launch_profile(
 
     // 公式Minecraft Launcherと同じ `.minecraft` 相当のディレクトリを共有する
     // (二重ダウンロードを避け、どちらのランチャーからでも同じファイルを再利用できるようにする)。
-    let launcher_root = minecraft_root();
     let paths = train_launcher_core::paths::LauncherPaths::new(&launcher_root);
     let java_progress = |message: &str| {
         if let Err(err) = app_handle.emit(
@@ -1012,8 +1051,12 @@ async fn launch_profile(
     tauri::async_runtime::spawn(async move {
         let exit_code = match child.wait().await {
             Ok(status) => status.code(),
-            Err(_) => None,
+            Err(err) => {
+                eprintln!("failed to wait for Minecraft: {err}");
+                None
+            }
         };
+        drop(activity);
         if let Err(err) = app_handle.emit(GAME_EXITED_EVENT, GameExitedPayload { exit_code }) {
             eprintln!("failed to emit game exited event: {err}");
         }
@@ -1025,11 +1068,15 @@ async fn launch_profile(
 /// 指定プロファイルのMinecraftをダウンロード(未取得分のみ)した上で起動する。
 #[tauri::command]
 async fn launch_minecraft(app_handle: AppHandle, profile_id: String) -> Result<(), String> {
+    let activity = app_handle.state::<GameActivity>().begin_launch()?;
+    let current = train_launcher_core::profile::get_profile(&profile_id).map_err(|err| err.to_string())?;
+    train_launcher_core::backup::ensure_restore_complete(&current.effective_game_dir(&game_data::shared_root()?))
+        .map_err(|err| err.to_string())?;
     // TRAiN管理プロファイルで `game_dir` が未指定であれば、専用の隔離フォルダを割り当てる
     // (既存のMod・リソースパック管理ファイルがあれば併せて移行する)。
     let profile = train_launcher_core::profile::ensure_isolated_game_dir(&profile_id)
         .map_err(|err| err.to_string())?;
-    launch_profile(app_handle, profile).await
+    launch_profile(app_handle, profile, activity).await
 }
 
 /// `filenames` の中から `keep` に含まれないものを `dir` から削除し、削除後(=`keep`との
@@ -1126,6 +1173,7 @@ async fn join_train_server(
     use train_launcher_core::profile::{Profile, ProfileSource};
     use train_launcher_mods::resolver::{download_resolved_file, resolved_file_from_direct_url};
 
+    let activity = app_handle.state::<GameActivity>().begin_launch()?;
     let _ = app_handle.emit(
         LAUNCH_PROGRESS_EVENT,
         LaunchProgressPayload {
@@ -1159,7 +1207,16 @@ async fn join_train_server(
     // アドレス・options.txt上で既に自動有効化済みのリソースパック一覧・前回インストールした
     // 管理ファイル一覧・割り当て済みの隔離フォルダを引き継ぐ(新規プロファイル作成時は
     // いずれも空)。
-    let previous_profile = train_launcher_core::profile::get_profile(&profile_id).ok();
+    let previous_profile = match train_launcher_core::profile::get_profile(&profile_id) {
+        Ok(previous) => {
+            train_launcher_core::backup::ensure_restore_complete(
+                &previous.effective_game_dir(&game_data::shared_root()?),
+            ).map_err(|err| err.to_string())?;
+            Some(previous)
+        }
+        Err(train_launcher_core::CoreError::ProfileNotFound(_)) => None,
+        Err(err) => return Err(err.to_string()),
+    };
     let profile = Profile {
         id: profile_id.clone(),
         name: server_name,
@@ -1175,9 +1232,9 @@ async fn join_train_server(
         java_path: previous_profile
             .as_ref()
             .and_then(|profile| profile.java_path.clone()),
-        max_memory_mb: None,
+        max_memory_mb: previous_profile.as_ref().and_then(|profile| profile.max_memory_mb),
         source: ProfileSource::Train,
-        last_launched_at: None,
+        last_launched_at: previous_profile.as_ref().and_then(|profile| profile.last_launched_at.clone()),
         last_server_address: previous_profile
             .as_ref()
             .and_then(|profile| profile.last_server_address.clone()),
@@ -1208,6 +1265,8 @@ async fn join_train_server(
         .map_err(|err| err.to_string())?;
 
     let profile_game_dir = profile.effective_game_dir(&minecraft_root());
+    train_launcher_core::backup::ensure_restore_complete(&profile_game_dir)
+        .map_err(|err| err.to_string())?;
 
     // このプロファイル自身について、サーバー側でMod構成が変更され今回のURL一覧に
     // 含まれなくなったファイルがあれば、専用フォルダから削除する。判定は「管理ファイル
@@ -1419,7 +1478,7 @@ async fn join_train_server(
         eprintln!("failed to persist server registration state: {err}");
     }
 
-    launch_profile(app_handle, profile).await?;
+    launch_profile(app_handle, profile, activity).await?;
     Ok(download_warnings)
 }
 
@@ -1437,7 +1496,8 @@ async fn join_train_server(
 /// 作成された、このプロファイル専用の隔離フォルダ(`game_dir` が明示的に設定されている
 /// 場合)であれば、従来通り `mods`/`resourcepacks` の中身を丸ごと削除する。
 #[tauri::command]
-async fn reset_server_profile_mods(server_id: String) -> Result<(), String> {
+async fn reset_server_profile_mods(app_handle: AppHandle, server_id: String) -> Result<(), String> {
+    let _activity = app_handle.state::<GameActivity>().begin_file_operation()?;
     let profile_id = format!("train-{server_id}");
     let mut profile = match train_launcher_core::profile::get_profile(&profile_id) {
         Ok(profile) => profile,
@@ -1445,6 +1505,8 @@ async fn reset_server_profile_mods(server_id: String) -> Result<(), String> {
         Err(err) => return Err(err.to_string()),
     };
     let game_dir = profile.effective_game_dir(&minecraft_root());
+    train_launcher_core::backup::ensure_restore_complete(&game_dir)
+        .map_err(|err| err.to_string())?;
     let uses_shared_dir = profile
         .game_dir
         .as_deref()
@@ -1510,6 +1572,15 @@ async fn reset_server_profile_mods(server_id: String) -> Result<(), String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .setup(|app| {
+            let handle = app.handle().clone();
+            app.manage(GameActivity::new(move |status| {
+                if let Err(err) = handle.emit("game://activity", status) {
+                    eprintln!("failed to emit game activity: {err}");
+                }
+            }));
+            Ok(())
+        })
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -1524,6 +1595,13 @@ pub fn run() {
             create_profile,
             update_profile,
             delete_profile,
+            game_data::get_game_activity,
+            game_data::list_settings_sources,
+            game_data::import_profile_settings,
+            game_data::list_profile_backups,
+            game_data::create_profile_backup,
+            game_data::restore_profile_backup,
+            game_data::open_backup_directory,
             list_minecraft_versions,
             list_supported_mod_loaders,
             list_mod_loader_versions,

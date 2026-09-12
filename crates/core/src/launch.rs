@@ -200,6 +200,7 @@ pub async fn launch(
     game_dir: &Path,
     auth: &LaunchAuth,
 ) -> Result<Child, CoreError> {
+    crate::backup::ensure_restore_complete(game_dir)?;
     let required_java = crate::java::required_major_version(&resolved_version.details)?;
     let preferred: Vec<String> = profile.java_path.iter().cloned().collect();
     let java = crate::java::ensure_runtime(

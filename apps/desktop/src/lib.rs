@@ -3,7 +3,8 @@
 //! フロントエンド(React)から `@tauri-apps/api` の `invoke()` 経由で呼び出す
 //! Tauri commandsをここに定義する。認証系commandは `train_launcher_auth` の実装を呼び出し、
 //! 取得したトークンはOSの資格情報ストア(keyring)に保存する。
-//! 実際にサインインを試すには Microsoft Entra ID / Discord Developer Portal でのアプリ登録と、
+//! 実際にサインインを試すには Microsoft Entra ID / Discord Developer Portal でのアプリ登録が
+//! 必要。公式配布版はクライアントIDをビルド時に埋め込み済みだが、ローカル開発ビルドでは
 //! 対応する環境変数(`TRAIN_LAUNCHER_MS_CLIENT_ID` 等、詳細はREADME参照)の設定が必要。
 
 use std::sync::{Arc, Mutex};
@@ -297,8 +298,9 @@ async fn list_mod_loader_versions(
 
 /// Discordサインイン後の所属サーバー一覧を取得する。
 ///
-/// 環境変数 `TRAIN_LAUNCHER_API_BASE_URL` が設定されていれば実際のTRAiN APIへ、未設定なら
-/// モック実装(`MockTrainApiClient`)へフォールバックする(`train_launcher_server_api::create_client`)。
+/// 既定では本番TRAiN APIへ接続する。環境変数 `TRAIN_LAUNCHER_API_BASE_URL` で接続先を
+/// 上書きでき、`mock` を指定するとモック実装(`MockTrainApiClient`)を強制できる
+/// (`train_launcher_server_api::create_client`)。
 #[tauri::command]
 async fn list_member_servers() -> Result<Vec<train_launcher_server_api::MemberServer>, String> {
     let discord_token = store::load_token(Provider::Discord)

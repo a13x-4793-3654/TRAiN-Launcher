@@ -7,8 +7,11 @@
 //! `docs/LAUNCHER-API.md` で確定済み(`GET {base}/api/members/{discord_user_id}/servers` /
 //! `GET {base}/api/servers/{server_id}/config`、`Authorization: Bearer <Discordアクセス
 //! トークン>`)。[`create_client`] は環境変数 [`API_BASE_URL_ENV_VAR`]
-//! (`TRAIN_LAUNCHER_API_BASE_URL`) が未設定の場合、[`MockTrainApiClient`] を返す
-//! (実サーバーが用意できない開発・デモ環境向けのフォールバック)。
+//! (`TRAIN_LAUNCHER_API_BASE_URL`) が未設定の場合、ビルド時に埋め込まれた既定URL
+//! ([`DEFAULT_API_BASE_URL`]、公式リリースビルドではGitHub Actionsのリポジトリ変数経由で
+//! 本番TRAiN APIが設定される)へ接続する。既定URLも埋め込まれていないローカル開発ビルドでは
+//! [`MockTrainApiClient`] にフォールバックする。モック実装を明示的に使いたい場合は、
+//! この環境変数に `mock` を設定する。
 //!
 //! 追加エンドポイント: `POST {base}/api/servers/{server_id}/link`(初回参加時、ランチャーが
 //! 既に確認済みのDiscord/Minecraftアカウント情報を使って紐づけを直接完了させる。
@@ -218,10 +221,26 @@ impl TrainApiClient for MockTrainApiClient {
 
 /// TRAiN APIのベースURLを指定する環境変数名。
 ///
-/// この環境変数が未設定(または空文字列)の場合、[`create_client`] は [`MockTrainApiClient`]
-/// を返す(実サーバー未提供時のフォールバック)。設定する場合はスキーム込みで指定する
-/// (例: `https://api.train.example.com`)。
+/// 設定する場合はスキーム込みで指定する(例: `https://api.train.example.com`)。
+/// 未設定(または空文字列)の場合は [`DEFAULT_API_BASE_URL`] が使われる。
+/// 開発時にモック実装を強制したい場合は、この環境変数に `mock`(大文字小文字は区別しない)
+/// を設定することで [`create_client`] は [`MockTrainApiClient`] を返す。
 pub const API_BASE_URL_ENV_VAR: &str = "TRAIN_LAUNCHER_API_BASE_URL";
+
+/// [`API_BASE_URL_ENV_VAR`](実行時の環境変数)が未設定の場合に使われる既定のベースURL。
+///
+/// ソースコードに直接ハードコードせず、**ビルド時**の環境変数
+/// `TRAIN_LAUNCHER_DEFAULT_API_BASE_URL` から [`option_env!`] で埋め込む。
+/// 公式リリースビルド(`.github/workflows/release.yml`)は、GitHub Actionsのリポジトリ
+/// 変数(Settings > Secrets and variables > Actions > Variables、`TRAIN_LAUNCHER_API_BASE_URL`)
+/// からこの値を渡すことで、本番TRAiN APIのURLを組み込む。
+/// ローカル開発でこのビルド時環境変数を設定しなかった場合は空文字列となり、
+/// [`create_client`] は([`API_BASE_URL_ENV_VAR`] も未設定なら)モック実装にフォールバックする
+/// (従来通りのローカル開発時の既定動作)。
+pub const DEFAULT_API_BASE_URL: &str = match option_env!("TRAIN_LAUNCHER_DEFAULT_API_BASE_URL") {
+    Some(value) => value,
+    None => "",
+};
 
 /// TRAiNバックエンドAPIの実HTTPクライアント実装。
 ///
@@ -330,16 +349,43 @@ impl TrainApiClient for HttpTrainApiClient {
     }
 }
 
-/// 環境変数 [`API_BASE_URL_ENV_VAR`] が設定されていれば [`HttpTrainApiClient`]、未設定なら
-/// [`MockTrainApiClient`] を返す。
+/// 環境変数 [`API_BASE_URL_ENV_VAR`](実行時)と [`DEFAULT_API_BASE_URL`](ビルド時に
+/// 埋め込まれた既定値)に応じて実クライアント/モックを切り替える。
+///
+/// - 実行時環境変数に `mock`(大文字小文字を区別しない)が設定されている場合は
+///   [`MockTrainApiClient`]。
+/// - それ以外の空でない値が設定されている場合は、その値をベースURLとした
+///   [`HttpTrainApiClient`](ローカル開発時の接続先上書き用)。
+/// - 実行時環境変数が未設定(または空文字列)の場合、[`DEFAULT_API_BASE_URL`] が空でなければ
+///   それをベースURLとした [`HttpTrainApiClient`](公式リリースビルドの既定動作)、
+///   空(ビルド時に埋め込まれていない、ローカル開発ビルドなど)なら [`MockTrainApiClient`]。
 ///
 /// `discord_access_token` は [`HttpTrainApiClient`] 使用時、認証ヘッダーとして付与される
 /// (詳細は [`HttpTrainApiClient`] のドキュメント参照)。
 pub fn create_client(discord_access_token: Option<String>) -> Box<dyn TrainApiClient> {
     match std::env::var(API_BASE_URL_ENV_VAR) {
+        Ok(value) if value.trim().eq_ignore_ascii_case("mock") => Box::new(MockTrainApiClient),
         Ok(base_url) if !base_url.trim().is_empty() => {
             Box::new(HttpTrainApiClient::new(base_url, discord_access_token))
         }
+        _ if !DEFAULT_API_BASE_URL.is_empty() => Box::new(HttpTrainApiClient::new(
+            DEFAULT_API_BASE_URL,
+            discord_access_token,
+        )),
         _ => Box::new(MockTrainApiClient),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// ビルド時環境変数 `TRAIN_LAUNCHER_DEFAULT_API_BASE_URL` が [`option_env!`] 経由で
+    /// [`super::DEFAULT_API_BASE_URL`] へ正しく埋め込まれることを確認する回帰テスト。
+    /// 未設定でビルドした場合は空文字列になる(ローカル開発時の既定=モック実装)ことも検証する。
+    #[test]
+    fn default_api_base_url_reflects_build_time_env_var() {
+        match option_env!("TRAIN_LAUNCHER_DEFAULT_API_BASE_URL") {
+            Some(expected) => assert_eq!(super::DEFAULT_API_BASE_URL, expected),
+            None => assert_eq!(super::DEFAULT_API_BASE_URL, ""),
+        }
     }
 }

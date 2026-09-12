@@ -5082,7 +5082,7 @@ dependencies = [
 
 [[package]]
 name = "train-launcher-auth"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "keyring",
  "minecraft-msa-auth",
@@ -5096,7 +5096,7 @@ dependencies = [
 
 [[package]]
 name = "train-launcher-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "dirs 5.0.1",
@@ -5112,7 +5112,7 @@ dependencies = [
 
 [[package]]
 name = "train-launcher-desktop"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -5132,7 +5132,7 @@ dependencies = [
 
 [[package]]
 name = "train-launcher-mods"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ferinth",
  "furse",
@@ -5147,7 +5147,7 @@ dependencies = [
 
 [[package]]
 name = "train-launcher-server-api"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "reqwest 0.12.28",

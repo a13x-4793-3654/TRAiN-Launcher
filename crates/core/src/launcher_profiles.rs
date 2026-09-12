@@ -33,6 +33,17 @@ pub struct OfficialProfile {
     pub game_dir: Option<String>,
 }
 
+/// 公式ランチャーが「最新リリース」「最新スナップショット」を自動追従するために内部で
+/// 使う組み込みプロファイルの`type`値に対応する、人間が読める既定名を返す。
+/// 該当しない`type`(通常のカスタムプロファイル等)の場合は`None`を返す。
+fn default_name_for_builtin_type(profile_type: Option<&str>) -> Option<&'static str> {
+    match profile_type {
+        Some("latest-release") => Some("最新リリース(自動追従)"),
+        Some("latest-snapshot") => Some("最新スナップショット(自動追従)"),
+        _ => None,
+    }
+}
+
 /// `launcher_profiles.json` の `profiles` セクションを読み込む。
 ///
 /// ファイルが存在しない場合(公式ランチャーを一度も起動していない)は空一覧を返す。
@@ -50,9 +61,20 @@ pub fn read_all(minecraft_root: &Path) -> Result<Vec<OfficialProfile>, CoreError
 
     let mut result = Vec::with_capacity(profiles.len());
     for (id, value) in profiles {
-        let name = value
+        // 公式ランチャーが自動生成する「最新リリース」「最新スナップショット」プロファイルは
+        // `"name": ""`(キー自体は存在するが空文字列)を持つ。`.and_then(Value::as_str)`は
+        // キーが存在する限り`Some("")`を返すため、`.unwrap_or(id)`ではこのケースを
+        // 補完できず、名前が空のまま(=UI上でオプションが空白になる)になってしまっていた。
+        // キーが存在しない場合・空文字列の場合の両方をカバーし、既知の組み込み種別には
+        // 分かりやすい既定名を、それ以外はIDをフォールバックとして使う。
+        let raw_name = value
             .get("name")
             .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let profile_type = value.get("type").and_then(Value::as_str);
+        let name = raw_name
+            .or_else(|| default_name_for_builtin_type(profile_type))
             .unwrap_or(id)
             .to_string();
         let last_version_id = value
@@ -196,4 +218,94 @@ fn write_root(path: &Path, root: &Value) -> Result<(), CoreError> {
     }
     std::fs::write(path, serde_json::to_vec_pretty(root)?)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write_profiles_json(minecraft_root: &Path, profiles: Value) {
+        std::fs::create_dir_all(minecraft_root).unwrap();
+        let root = json!({ "profiles": profiles });
+        std::fs::write(
+            launcher_profiles_path(minecraft_root),
+            serde_json::to_vec_pretty(&root).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn read_all_falls_back_to_id_when_name_key_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        write_profiles_json(
+            dir.path(),
+            json!({ "some-id": { "type": "custom" } }),
+        );
+
+        let profiles = read_all(dir.path()).unwrap();
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0].name, "some-id");
+    }
+
+    #[test]
+    fn read_all_falls_back_to_id_when_name_is_blank_string() {
+        // 公式ランチャーが「(Default)」以外の組み込みプロファイルで生成する
+        // `"name": ""` を再現する。以前は空文字列のままになっていた。
+        let dir = tempfile::tempdir().unwrap();
+        write_profiles_json(
+            dir.path(),
+            json!({ "abc123": { "name": "  ", "type": "custom" } }),
+        );
+
+        let profiles = read_all(dir.path()).unwrap();
+        assert_eq!(profiles[0].name, "abc123");
+    }
+
+    #[test]
+    fn read_all_uses_friendly_name_for_builtin_latest_release() {
+        let dir = tempfile::tempdir().unwrap();
+        write_profiles_json(
+            dir.path(),
+            json!({
+                "5ae6af95b2032ffb30272eef038adc34": {
+                    "name": "",
+                    "type": "latest-release",
+                    "lastVersionId": "latest-release"
+                }
+            }),
+        );
+
+        let profiles = read_all(dir.path()).unwrap();
+        assert_eq!(profiles[0].name, "最新リリース(自動追従)");
+    }
+
+    #[test]
+    fn read_all_uses_friendly_name_for_builtin_latest_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        write_profiles_json(
+            dir.path(),
+            json!({
+                "0387150b193857878b3f797ad63b2030": {
+                    "name": "",
+                    "type": "latest-snapshot",
+                    "lastVersionId": "latest-snapshot"
+                }
+            }),
+        );
+
+        let profiles = read_all(dir.path()).unwrap();
+        assert_eq!(profiles[0].name, "最新スナップショット(自動追従)");
+    }
+
+    #[test]
+    fn read_all_keeps_custom_name_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        write_profiles_json(
+            dir.path(),
+            json!({ "custom-id": { "name": "碓氷鯖 (本番)", "type": "custom" } }),
+        );
+
+        let profiles = read_all(dir.path()).unwrap();
+        assert_eq!(profiles[0].name, "碓氷鯖 (本番)");
+    }
 }

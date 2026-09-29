@@ -16,8 +16,8 @@ use std::time::Duration;
 use oauth2::basic::BasicClient;
 use oauth2::{AuthUrl, TokenUrl};
 use oauth2::{
-    AuthorizationCode, ClientId, ClientSecret, CsrfToken, PkceCodeChallenge, RedirectUrl, Scope,
-    TokenResponse,
+    AuthorizationCode, ClientId, ClientSecret, CsrfToken, PkceCodeChallenge, RedirectUrl,
+    RefreshToken, Scope, TokenResponse,
 };
 use serde::Deserialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -43,6 +43,13 @@ pub struct DiscordToken {
     pub expires_at: Option<i64>,
     pub user_id: String,
     pub username: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct DiscordRefreshToken {
+    pub access_token: String,
+    pub refresh_token: String,
+    pub expires_at: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -132,6 +139,40 @@ async fn fetch_discord_user(access_token: &str) -> Result<DiscordUserResponse, A
         .json::<DiscordUserResponse>()
         .await
         .map_err(AuthError::from)
+}
+
+/// 保存済みのリフレッシュトークンでDiscordアクセストークンを更新する。
+/// 更新応答にリフレッシュトークンが無い場合は従来の値を引き継ぐ。
+pub async fn refresh_access_token(
+    config: &DiscordConfig,
+    refresh_token: &str,
+) -> Result<DiscordRefreshToken, AuthError> {
+    let mut client = BasicClient::new(ClientId::new(config.client_id.clone()))
+        .set_token_uri(TokenUrl::new(DISCORD_TOKEN_URL.to_string()).expect("static URL is valid"));
+    if let Some(secret) = &config.client_secret {
+        client = client.set_client_secret(ClientSecret::new(secret.clone()));
+    }
+
+    let http_client = oauth2::reqwest::Client::new();
+    let token = client
+        .exchange_refresh_token(&RefreshToken::new(refresh_token.to_string()))
+        .request_async(&http_client)
+        .await
+        .map_err(|err| AuthError::Oauth(err.to_string()))?;
+    let expires_at = token.expires_in().map(|duration| {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        (now + duration).as_secs() as i64
+    });
+    Ok(DiscordRefreshToken {
+        access_token: token.access_token().secret().to_string(),
+        refresh_token: token
+            .refresh_token()
+            .map(|t| t.secret().to_string())
+            .unwrap_or_else(|| refresh_token.to_string()),
+        expires_at,
+    })
 }
 
 /// ローカルループバックサーバで1回だけリダイレクトを受け付け、`code`/`state` クエリ

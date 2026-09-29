@@ -8,7 +8,7 @@
 //! 対応する環境変数(`TRAIN_LAUNCHER_MS_CLIENT_ID` 等、詳細はREADME参照)の設定が必要。
 
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
@@ -20,6 +20,104 @@ mod game_activity;
 mod game_data;
 
 use game_activity::GameActivity;
+
+const DISCORD_REFRESH_MARGIN_SECS: i64 = 5 * 60;
+const DISCORD_REFRESH_CHECK_INTERVAL: Duration = Duration::from_secs(60);
+
+#[derive(Default)]
+struct DiscordCredentials(tokio::sync::Mutex<()>);
+
+fn discord_needs_refresh(expires_at: Option<i64>, now: i64) -> bool {
+    expires_at.is_none_or(|expiry| expiry <= now.saturating_add(DISCORD_REFRESH_MARGIN_SECS))
+}
+
+fn updated_discord_record(
+    mut record: TokenRecord,
+    refreshed: discord::DiscordRefreshToken,
+) -> TokenRecord {
+    record.access_token = refreshed.access_token;
+    record.refresh_token = Some(refreshed.refresh_token);
+    record.expires_at = refreshed.expires_at;
+    record
+}
+
+/// 期限が近い場合のみ更新し、ローテーション後のトークンをユーザー情報と共に保存する。
+/// サインイン・サインアウトとも同じロックを使い、古い更新結果による上書きを防ぐ。
+async fn current_discord_token(app_handle: &AppHandle) -> Result<Option<TokenRecord>, String> {
+    let credentials = app_handle.state::<DiscordCredentials>();
+    let _guard = credentials.0.lock().await;
+    let Some(mut record) = store::load_token(Provider::Discord).map_err(|err| err.to_string())?
+    else {
+        return Ok(None);
+    };
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|err| err.to_string())?
+        .as_secs() as i64;
+    if !discord_needs_refresh(record.expires_at, now) {
+        return Ok(Some(record));
+    }
+    let Some(refresh_token) = record.refresh_token.as_deref() else {
+        if record.expires_at.is_none_or(|expiry| expiry <= now) {
+            return Err("Discordの認証が期限切れです。再度サインインしてください".to_string());
+        }
+        return Ok(Some(record));
+    };
+    let config = config::DiscordConfig::from_env().map_err(|err| err.to_string())?;
+    let refreshed = discord::refresh_access_token(&config, refresh_token)
+        .await
+        .map_err(|err| format!("Discordの認証を更新できませんでした。通信状態を確認するか、再度サインインしてください ({err})"))?;
+    record = updated_discord_record(record, refreshed);
+    store::save_token(Provider::Discord, &record).map_err(|err| err.to_string())?;
+    Ok(Some(record))
+}
+
+#[cfg(test)]
+mod discord_refresh_tests {
+    use super::{discord_needs_refresh, updated_discord_record, DISCORD_REFRESH_MARGIN_SECS};
+    use train_launcher_auth::discord::DiscordRefreshToken;
+    use train_launcher_auth::store::TokenRecord;
+
+    #[test]
+    fn refreshes_before_expiry_and_when_expiry_is_unknown() {
+        let now = 1_000_000;
+        assert!(!discord_needs_refresh(
+            Some(now + DISCORD_REFRESH_MARGIN_SECS + 1),
+            now
+        ));
+        assert!(discord_needs_refresh(
+            Some(now + DISCORD_REFRESH_MARGIN_SECS),
+            now
+        ));
+        assert!(discord_needs_refresh(Some(now - 1), now));
+        assert!(discord_needs_refresh(None, now));
+    }
+
+    #[test]
+    fn rotated_token_preserves_user_identity() {
+        let record = TokenRecord {
+            access_token: "old-access".into(),
+            refresh_token: Some("old-refresh".into()),
+            expires_at: Some(100),
+            display_name: Some("player".into()),
+            uuid: None,
+            user_id: Some("12345".into()),
+        };
+        let updated = updated_discord_record(
+            record,
+            DiscordRefreshToken {
+                access_token: "new-access".into(),
+                refresh_token: "new-refresh".into(),
+                expires_at: Some(200),
+            },
+        );
+        assert_eq!(updated.access_token, "new-access");
+        assert_eq!(updated.refresh_token.as_deref(), Some("new-refresh"));
+        assert_eq!(updated.expires_at, Some(200));
+        assert_eq!(updated.display_name.as_deref(), Some("player"));
+        assert_eq!(updated.user_id.as_deref(), Some("12345"));
+    }
+}
 
 /// フロントエンドへ返すサインイン結果。
 #[derive(Debug, Clone, Serialize)]
@@ -36,8 +134,9 @@ struct SignInResult {
 async fn sign_in_with_discord(app_handle: AppHandle) -> Result<SignInResult, String> {
     let config = config::DiscordConfig::from_env().map_err(|err| err.to_string())?;
 
+    let browser_handle = app_handle.clone();
     let token = discord::sign_in(&config, move |url| {
-        if let Err(err) = app_handle.opener().open_url(&url, None::<&str>) {
+        if let Err(err) = browser_handle.opener().open_url(&url, None::<&str>) {
             // ブラウザを自動的に開けなくても致命的ではない(ユーザーがURLを手動で開ける可能性がある)
             // ため、ログ出力のみに留めてフロー自体は継続する。
             eprintln!("failed to open browser for Discord sign-in: {err}");
@@ -46,6 +145,8 @@ async fn sign_in_with_discord(app_handle: AppHandle) -> Result<SignInResult, Str
     .await
     .map_err(|err| err.to_string())?;
 
+    let credentials = app_handle.state::<DiscordCredentials>();
+    let _guard = credentials.0.lock().await;
     store::save_token(
         Provider::Discord,
         &TokenRecord {
@@ -195,7 +296,9 @@ async fn sign_in_with_microsoft(app_handle: AppHandle) -> Result<SignInResult, S
 
 /// Discordのサインアウト(保存済みトークンの削除)。
 #[tauri::command]
-fn sign_out_discord() -> Result<(), String> {
+async fn sign_out_discord(app_handle: AppHandle) -> Result<(), String> {
+    let credentials = app_handle.state::<DiscordCredentials>();
+    let _guard = credentials.0.lock().await;
     store::delete_token(Provider::Discord).map_err(|err| err.to_string())
 }
 
@@ -320,9 +423,11 @@ async fn list_mod_loader_versions(
 /// 上書きでき、`mock` を指定するとモック実装(`MockTrainApiClient`)を強制できる
 /// (`train_launcher_server_api::create_client`)。
 #[tauri::command]
-async fn list_member_servers() -> Result<Vec<train_launcher_server_api::MemberServer>, String> {
-    let discord_token = store::load_token(Provider::Discord)
-        .map_err(|err| err.to_string())?
+async fn list_member_servers(
+    app_handle: AppHandle,
+) -> Result<Vec<train_launcher_server_api::MemberServer>, String> {
+    let discord_token = current_discord_token(&app_handle)
+        .await?
         .ok_or_else(|| "Discordアカウントでサインインしてください".to_string())?;
     // Discordの実ユーザーID(スノーフレークID)を使う。本フィールド追加前にサインインして
     // 保存されたトークンには`user_id`が無いため、その場合のみ表示名にフォールバックする
@@ -344,10 +449,11 @@ async fn list_member_servers() -> Result<Vec<train_launcher_server_api::MemberSe
 /// を取得する(「所属サーバー詳細」画面用。参加前にMod構成を確認できるようにする)。
 #[tauri::command]
 async fn get_server_config(
+    app_handle: AppHandle,
     server_id: String,
 ) -> Result<train_launcher_server_api::ServerConfig, String> {
-    let discord_access_token = store::load_token(Provider::Discord)
-        .map_err(|err| err.to_string())?
+    let discord_access_token = current_discord_token(&app_handle)
+        .await?
         .map(|record| record.access_token);
     let client = train_launcher_server_api::create_client(discord_access_token);
     client
@@ -364,9 +470,9 @@ async fn get_server_config(
 /// (2) Microsoft/Xbox認証済みのMinecraftアカウント(UUID・プレイヤー名)の両方を保持して
 /// いるため、それらをそのままTRAiN側へ渡して紐づけを完結させる。
 #[tauri::command]
-async fn link_train_account(server_id: String) -> Result<(), String> {
-    let discord_access_token = store::load_token(Provider::Discord)
-        .map_err(|err| err.to_string())?
+async fn link_train_account(app_handle: AppHandle, server_id: String) -> Result<(), String> {
+    let discord_access_token = current_discord_token(&app_handle)
+        .await?
         .ok_or_else(|| "Discordアカウントでサインインしてください".to_string())?
         .access_token;
 
@@ -407,10 +513,11 @@ async fn get_global_announcements(
 /// 認証・非開示ポリシーは `get_server_config` と同じ(所属メンバーのみ閲覧可能)。
 #[tauri::command]
 async fn get_server_announcements(
+    app_handle: AppHandle,
     server_id: String,
 ) -> Result<Vec<train_launcher_server_api::Announcement>, String> {
-    let discord_access_token = store::load_token(Provider::Discord)
-        .map_err(|err| err.to_string())?
+    let discord_access_token = current_discord_token(&app_handle)
+        .await?
         .map(|record| record.access_token);
     let client = train_launcher_server_api::create_client(discord_access_token);
     client
@@ -1184,8 +1291,8 @@ async fn join_train_server(
         },
     );
 
-    let discord_access_token = store::load_token(Provider::Discord)
-        .map_err(|err| err.to_string())?
+    let discord_access_token = current_discord_token(&app_handle)
+        .await?
         .map(|record| record.access_token);
     let client = train_launcher_server_api::create_client(discord_access_token);
     let server_config = client
@@ -1573,6 +1680,18 @@ async fn reset_server_profile_mods(app_handle: AppHandle, server_id: String) -> 
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
+            let handle = app.handle().clone();
+            app.manage(DiscordCredentials::default());
+            tauri::async_runtime::spawn(async move {
+                let mut interval = tokio::time::interval(DISCORD_REFRESH_CHECK_INTERVAL);
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                loop {
+                    interval.tick().await;
+                    if let Err(err) = current_discord_token(&handle).await {
+                        eprintln!("failed to refresh Discord credentials: {err}");
+                    }
+                }
+            });
             let handle = app.handle().clone();
             app.manage(GameActivity::new(move |status| {
                 if let Err(err) = handle.emit("game://activity", status) {

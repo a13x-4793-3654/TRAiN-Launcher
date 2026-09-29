@@ -44,6 +44,7 @@ TRAiN Launcher は、TRAiN 管理下のサーバーに参加しているユー�
 - Microsoft アカウントでのサインインには Microsoft Entra ID (Azure AD) アプリ登録 + Minecraft API 利用申請 (`XboxLive.signin` スコープ) が必要
 - Discord サインインには Discord OAuth2 を利用
 - 認証フロー自体は `crates/auth` に実装済み(MSAはデバイスコードフロー、DiscordはPKCE付き認可コードフロー+ローカルループバックサーバでのリダイレクト受信)。取得したトークンはOSの資格情報ストア(Windows Credential Manager / macOS Keychain / Linux Secret Service)に保存される
+- Discord のアクセストークンは、ランチャー起動時と起動中の定期確認(1分ごと)、サーバー API 利用前に有効期限を確認し、期限の5分前から保存済みリフレッシュトークンで自動更新する。更新できない場合は再サインインが必要になる
 
 ### 自動アップデート
 

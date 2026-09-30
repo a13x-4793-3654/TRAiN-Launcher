@@ -1173,17 +1173,81 @@ async fn launch_profile(
 }
 
 /// 指定プロファイルのMinecraftをダウンロード(未取得分のみ)した上で起動する。
+///
+/// TRAiNサーバー用プロファイルの場合は、起動前に [`sync_train_server_profile`] で最新の
+/// サーバー設定へ同期する(ランチャー起動中にサーバー側が更新された場合でも、古い
+/// Mod構成のまま接続してしまわないようにするため)。戻り値は同期時のダウンロード警告一覧
+/// (TRAiN以外のプロファイルでは常に空)。
 #[tauri::command]
-async fn launch_minecraft(app_handle: AppHandle, profile_id: String) -> Result<(), String> {
+async fn launch_minecraft(app_handle: AppHandle, profile_id: String) -> Result<Vec<String>, String> {
     let activity = app_handle.state::<GameActivity>().begin_launch()?;
     let current = train_launcher_core::profile::get_profile(&profile_id).map_err(|err| err.to_string())?;
     train_launcher_core::backup::ensure_restore_complete(&current.effective_game_dir(&game_data::shared_root()?))
         .map_err(|err| err.to_string())?;
+    if let Some(server_id) = train_server_id(&current) {
+        let (profile, download_warnings) =
+            sync_train_server_profile(&app_handle, server_id, current.name.clone()).await?;
+        launch_profile(app_handle, profile, activity).await?;
+        return Ok(download_warnings);
+    }
     // TRAiN管理プロファイルで `game_dir` が未指定であれば、専用の隔離フォルダを割り当てる
     // (既存のMod・リソースパック管理ファイルがあれば併せて移行する)。
     let profile = train_launcher_core::profile::ensure_isolated_game_dir(&profile_id)
         .map_err(|err| err.to_string())?;
-    launch_profile(app_handle, profile, activity).await
+    launch_profile(app_handle, profile, activity).await?;
+    Ok(Vec::new())
+}
+
+/// 起動前にTRAiN APIと同期すべきプロファイルであれば、そのサーバーIDを返す。
+fn train_server_id(profile: &train_launcher_core::profile::Profile) -> Option<String> {
+    if profile.source != train_launcher_core::profile::ProfileSource::Train {
+        return None;
+    }
+    profile
+        .server_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+}
+
+#[cfg(test)]
+mod train_server_id_tests {
+    use super::train_server_id;
+    use train_launcher_core::profile::Profile;
+
+    fn profile(value: serde_json::Value) -> Profile {
+        let mut base = serde_json::json!({
+            "id": "p",
+            "name": "p",
+            "minecraft_version": "1.21",
+        });
+        base.as_object_mut()
+            .unwrap()
+            .extend(value.as_object().unwrap().clone());
+        serde_json::from_value(base).unwrap()
+    }
+
+    #[test]
+    fn train_profile_with_server_id_is_synced() {
+        let p = profile(serde_json::json!({ "server_id": "abc", "source": "train" }));
+        assert_eq!(train_server_id(&p).as_deref(), Some("abc"));
+    }
+
+    #[test]
+    fn profiles_without_server_are_not_synced() {
+        assert_eq!(train_server_id(&profile(serde_json::json!({}))), None);
+        assert_eq!(
+            train_server_id(&profile(serde_json::json!({ "server_id": "  " }))),
+            None
+        );
+        assert_eq!(
+            train_server_id(&profile(
+                serde_json::json!({ "server_id": "abc", "source": "official" })
+            )),
+            None
+        );
+    }
 }
 
 /// `filenames` の中から `keep` に含まれないものを `dir` から削除し、削除後(=`keep`との
@@ -1277,10 +1341,27 @@ async fn join_train_server(
     server_id: String,
     server_name: String,
 ) -> Result<Vec<String>, String> {
+    let activity = app_handle.state::<GameActivity>().begin_launch()?;
+    let (profile, download_warnings) =
+        sync_train_server_profile(&app_handle, server_id, server_name).await?;
+    launch_profile(app_handle, profile, activity).await?;
+    Ok(download_warnings)
+}
+
+/// TRAiN APIから最新のサーバー設定を取得し、サーバー専用プロファイルとMod・リソース
+/// パック・servers.dat・options.txtを同期する(起動はしない)。
+///
+/// [`join_train_server`] と、ホーム/プロファイル画面からTRAiNプロファイルを起動する
+/// [`launch_minecraft`] の両方から呼ばれる。ランチャー起動中にサーバー側の構成が
+/// 更新されても、どの画面から起動しても必ず最新の構成で接続できるようにするため。
+async fn sync_train_server_profile(
+    app_handle: &AppHandle,
+    server_id: String,
+    server_name: String,
+) -> Result<(train_launcher_core::profile::Profile, Vec<String>), String> {
     use train_launcher_core::profile::{Profile, ProfileSource};
     use train_launcher_mods::resolver::{download_resolved_file, resolved_file_from_direct_url};
 
-    let activity = app_handle.state::<GameActivity>().begin_launch()?;
     let _ = app_handle.emit(
         LAUNCH_PROGRESS_EVENT,
         LaunchProgressPayload {
@@ -1585,8 +1666,7 @@ async fn join_train_server(
         eprintln!("failed to persist server registration state: {err}");
     }
 
-    launch_profile(app_handle, profile, activity).await?;
-    Ok(download_warnings)
+    Ok((profile, download_warnings))
 }
 
 /// TRAiNサーバー専用プロファイルの導入済みMod・リソースパックを削除する(「初期化」用)。

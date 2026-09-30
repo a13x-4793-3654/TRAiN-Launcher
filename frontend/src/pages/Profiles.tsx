@@ -443,14 +443,29 @@ export function ProfilesPage() {
     setLaunchingId(profile.id);
     setProgress(null);
     beginLaunch();
-    invoke("launch_minecraft", { profileId: profile.id })
-      .then(() => {
+    invoke<string[]>("launch_minecraft", { profileId: profile.id })
+      .then((downloadWarnings) => {
+        if (downloadWarnings.length > 0) {
+          dispatchToast(
+            <Toast>
+              <ToastTitle>
+                起動しました(一部のMod/リソースパックを導入できませんでした)
+              </ToastTitle>
+              <ToastBody>
+                {downloadWarnings.map((warning) => (
+                  <div key={warning}>{warning}</div>
+                ))}
+              </ToastBody>
+            </Toast>,
+            { intent: "warning" },
+          );
+          return;
+        }
         dispatchToast(
           <Toast>
             <ToastTitle>起動しました</ToastTitle>
             <ToastBody>
-              {profile.name}({profile.minecraft_version})
-              のダウンロード・起動を開始しました
+              {profile.name} のダウンロード・起動を開始しました
             </ToastBody>
           </Toast>,
           { intent: "success" },
@@ -469,6 +484,7 @@ export function ProfilesPage() {
         setLaunchingId(null);
         setProgress(null);
         endLaunch();
+        refreshProfiles();
       });
   };
 

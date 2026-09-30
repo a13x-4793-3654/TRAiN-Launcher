@@ -16,6 +16,7 @@ use tauri_plugin_opener::OpenerExt;
 use train_launcher_auth::store::{self, Provider, TokenRecord};
 use train_launcher_auth::{config, discord, msa, xbox};
 
+mod crash_reports;
 mod game_activity;
 mod game_data;
 
@@ -1129,6 +1130,10 @@ async fn launch_profile(
     };
 
     let game_dir = profile.effective_game_dir(&launcher_root);
+    // クラッシュレポートのファイル時刻と比較するため、起動直前の時刻を少し余裕を持って記録する
+    let launched_at = SystemTime::now()
+        .checked_sub(Duration::from_secs(5))
+        .unwrap_or(UNIX_EPOCH);
     let mut child = train_launcher_core::launch::launch(
         &profile,
         &resolved_version,
@@ -1138,6 +1143,18 @@ async fn launch_profile(
     )
     .await
     .map_err(|err| err.to_string())?;
+    let crash_watch = crash_reports::CrashWatch {
+        server_id: profile.server_id.clone(),
+        profile_name: profile.name.clone(),
+        minecraft_version: profile.minecraft_version.clone(),
+        mod_loader: profile.mod_loader.as_ref().map(|loader| match &profile.mod_loader_version {
+            Some(version) => format!("{loader} {version}"),
+            None => loader.clone(),
+        }),
+        game_dir: game_dir.clone(),
+        launched_at,
+        access_token: auth.access_token.clone(),
+    };
 
     // ホーム画面の「最近使ったプロファイル」表示用に最終起動日時を記録する。
     // 記録に失敗してもゲーム自体の起動は継続させたいため、エラーはログ出力のみに留める。
@@ -1167,6 +1184,7 @@ async fn launch_profile(
         if let Err(err) = app_handle.emit(GAME_EXITED_EVENT, GameExitedPayload { exit_code }) {
             eprintln!("failed to emit game exited event: {err}");
         }
+        crash_watch.check_after_exit(&app_handle, exit_code).await;
     });
 
     Ok(())
@@ -1762,6 +1780,7 @@ pub fn run() {
         .setup(|app| {
             let handle = app.handle().clone();
             app.manage(DiscordCredentials::default());
+            app.manage(crash_reports::PendingCrashReports::default());
             tauri::async_runtime::spawn(async move {
                 let mut interval = tokio::time::interval(DISCORD_REFRESH_CHECK_INTERVAL);
                 interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -1823,6 +1842,9 @@ pub fn run() {
             reset_server_profile_mods,
             get_app_settings,
             save_app_settings,
+            crash_reports::list_pending_crash_reports,
+            crash_reports::submit_crash_report,
+            crash_reports::dismiss_crash_report,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

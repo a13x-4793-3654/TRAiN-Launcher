@@ -4,6 +4,7 @@
 //! 起動コマンドの構築を担当するコアクレート。
 
 pub mod backup;
+pub mod crash_report;
 pub mod download;
 pub mod game_settings;
 pub mod java;

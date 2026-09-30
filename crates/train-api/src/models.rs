@@ -60,3 +60,34 @@ pub struct Announcement {
     /// ISO8601 (UTC)。
     pub published_at: String,
 }
+
+/// [`TrainApiClient::submit_crash_report`] のリクエスト本体。
+///
+/// TRAiN側の `POST /api/servers/{server_id}/crash-reports` の契約
+/// (`docs/LAUNCHER-API.md` 7章)に合わせる。送る前に必ず本人の同意を得ること。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CrashReportSubmission {
+    /// `"crash_report"`(`crash-reports/crash-*-client.txt`)または
+    /// `"jvm_crash"`(`hs_err_pid*.log`)。
+    pub kind: String,
+    pub file_name: String,
+    /// ISO8601 (UTC)。
+    pub crashed_at: String,
+    pub content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub log_excerpt: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub minecraft_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mod_loader: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub launcher_version: Option<String>,
+}
+
+/// [`TrainApiClient::submit_crash_report`] の応答(登録されたレポートのID)。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CrashReportReceipt {
+    pub id: String,
+}

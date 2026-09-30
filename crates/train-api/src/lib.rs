@@ -30,7 +30,10 @@ pub mod models;
 use async_trait::async_trait;
 use serde::Deserialize;
 
-pub use models::{Announcement, LinkAccountRequest, MemberServer, ServerConfig};
+pub use models::{
+    Announcement, CrashReportReceipt, CrashReportSubmission, LinkAccountRequest, MemberServer,
+    ServerConfig,
+};
 
 /// train-launcher-server-api 全体で使用するエラー型。
 ///
@@ -78,6 +81,25 @@ pub enum TrainApiError {
          ない場合はサーバー管理者に確認してください"
     )]
     UuidAlreadyLinked,
+    /// 403 `not_linked`(`submit_crash_report`のみ): このサーバーのギルドで、まだ
+    /// Minecraftアカウントとの紐づけが済んでいない。
+    #[error(
+        "このサーバーではまだMinecraftアカウントの紐づけが済んでいないため、クラッシュレポートを\
+         送れません。一度サーバーへ参加して紐づけを済ませてください"
+    )]
+    NotLinked,
+    /// 422 `not_connected`(`submit_crash_report`のみ): クラッシュ時刻の前後に、
+    /// そのサーバーへ参加していた記録がTRAiN側に無い。
+    #[error(
+        "クラッシュした時刻にこのサーバーへ接続していた記録が見つからないため、送信できませんでした"
+    )]
+    NotConnected,
+    /// 413 `payload_too_large`(`submit_crash_report`のみ)。
+    #[error("クラッシュレポートが大きすぎるため送信できませんでした")]
+    PayloadTooLarge,
+    /// 429 `rate_limited`(`submit_crash_report`のみ)。
+    #[error("短時間に送信しすぎています。しばらく時間をおいてから送り直してください")]
+    RateLimited,
     /// 上記に当てはまらない未知のエラーコード。TRAiN側の仕様変更などを検知できるよう、
     /// status/codeをそのまま表示する。
     #[error("APIエラーが発生しました(status: {status}, code: {code})")]
@@ -103,12 +125,16 @@ async fn map_error_response(response: reqwest::Response) -> TrainApiError {
         .unwrap_or_default();
     match (status, code.as_str()) {
         (401, _) => TrainApiError::Unauthorized,
+        (403, "not_linked") => TrainApiError::NotLinked,
         (403, _) => TrainApiError::Forbidden,
         (404, "not_configured") => TrainApiError::NotConfigured,
         (404, _) => TrainApiError::NotFound,
         (405, _) => TrainApiError::MethodNotAllowed,
         (409, "already_linked") => TrainApiError::AlreadyLinked,
         (409, "uuid_already_linked") => TrainApiError::UuidAlreadyLinked,
+        (413, _) => TrainApiError::PayloadTooLarge,
+        (422, "not_connected") => TrainApiError::NotConnected,
+        (429, _) => TrainApiError::RateLimited,
         (400, _) => TrainApiError::InvalidRequest,
         _ => TrainApiError::Api {
             status,
@@ -151,6 +177,16 @@ pub trait TrainApiClient: Send + Sync {
         &self,
         server_id: &str,
     ) -> Result<Vec<Announcement>, TrainApiError>;
+
+    /// そのサーバーへ接続中に起きたクライアント側のクラッシュを報告する。
+    ///
+    /// 呼び出し元は事前に、送る内容をユーザーへ提示して同意を得ること
+    /// (同意の無い自動送信はしない)。接続中だったかはTRAiN側が参加履歴で確かめる。
+    async fn submit_crash_report(
+        &self,
+        server_id: &str,
+        report: &CrashReportSubmission,
+    ) -> Result<CrashReportReceipt, TrainApiError>;
 }
 
 /// 開発・テスト用のモック実装。常にダミーデータを返す。
@@ -216,6 +252,17 @@ impl TrainApiClient for MockTrainApiClient {
             severity: "warning".to_string(),
             published_at: "2026-01-02T00:00:00.000Z".to_string(),
         }])
+    }
+
+    async fn submit_crash_report(
+        &self,
+        _server_id: &str,
+        _report: &CrashReportSubmission,
+    ) -> Result<CrashReportReceipt, TrainApiError> {
+        // モック環境では常に成功させる(同意〜送信完了までの流れをUI上で確認できるようにする)。
+        Ok(CrashReportReceipt {
+            id: "mock-crash-report-1".to_string(),
+        })
     }
 }
 
@@ -346,6 +393,22 @@ impl TrainApiClient for HttpTrainApiClient {
             return Err(map_error_response(response).await);
         }
         Ok(response.json::<Vec<Announcement>>().await?)
+    }
+
+    async fn submit_crash_report(
+        &self,
+        server_id: &str,
+        report: &CrashReportSubmission,
+    ) -> Result<CrashReportReceipt, TrainApiError> {
+        let response = self
+            .post(&format!("/api/servers/{server_id}/crash-reports"))
+            .json(report)
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            return Err(map_error_response(response).await);
+        }
+        Ok(response.json::<CrashReportReceipt>().await?)
     }
 }
 

@@ -36,6 +36,7 @@ import { LaunchStatusProvider, LaunchingModal } from "./LaunchStatus";
 import { AppUpdateProvider, useAppUpdate } from "./AppUpdate";
 import { UpdateBanner } from "./UpdateBanner";
 import { GameDataOperationModal } from "./GameActivity";
+import { CrashReportConsentModal } from "./CrashReportConsent";
 
 const TOASTER_ID = "train-launcher-toaster";
 
@@ -280,6 +281,7 @@ function AppShell() {
       <Toaster toasterId={TOASTER_ID} />
       <LaunchingModal />
       <GameDataOperationModal />
+      <CrashReportConsentModal />
     </div>
   );
 }

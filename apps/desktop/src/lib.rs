@@ -160,6 +160,10 @@ async fn sign_in_with_discord(app_handle: AppHandle) -> Result<SignInResult, Str
         },
     )
     .map_err(|err| err.to_string())?;
+    drop(_guard);
+    reconcile_expired_workspaces(&app_handle).await.map_err(|err| {
+        format!("Discordへのサインインは完了しましたが、ワークスペースの整理に失敗しました。再試行してください: {err}")
+    })?;
 
     Ok(SignInResult {
         display_name: token.username,
@@ -349,7 +353,8 @@ fn save_app_settings(
 
 /// 保存済みプロファイル一覧を取得する。
 #[tauri::command]
-fn list_profiles() -> Result<Vec<train_launcher_core::profile::Profile>, String> {
+async fn list_profiles(app_handle: AppHandle) -> Result<Vec<train_launcher_core::profile::Profile>, String> {
+    reconcile_expired_workspaces(&app_handle).await?;
     train_launcher_core::profile::list_profiles().map_err(|err| err.to_string())
 }
 
@@ -427,6 +432,7 @@ async fn list_mod_loader_versions(
 async fn list_member_servers(
     app_handle: AppHandle,
 ) -> Result<Vec<train_launcher_server_api::MemberServer>, String> {
+    let expired = reconcile_expired_workspaces(&app_handle).await?;
     let discord_token = current_discord_token(&app_handle)
         .await?
         .ok_or_else(|| "Discordアカウントでサインインしてください".to_string())?;
@@ -440,10 +446,48 @@ async fn list_member_servers(
         .unwrap_or_default();
 
     let client = train_launcher_server_api::create_client(Some(discord_token.access_token));
-    client
+    let mut servers = client
         .get_member_servers(&discord_user_id)
         .await
-        .map_err(|err| err.to_string())
+        .map_err(|err| err.to_string())?;
+    servers.retain(|server| !expired.contains(&server.id));
+    Ok(servers)
+}
+
+async fn reconcile_expired_workspaces(app_handle: &AppHandle) -> Result<Vec<String>, String> {
+    let Some(token) = current_discord_token(app_handle).await? else {
+        return Ok(Vec::new());
+    };
+    let user_id = token.user_id.ok_or_else(|| {
+        "ワークスペースの期限を確認するため、Discordで再サインインしてください".to_string()
+    })?;
+    let client = train_launcher_server_api::create_client(Some(token.access_token));
+    let expired = client
+        .get_expired_workspaces(&user_id)
+        .await
+        .map_err(|err| format!("期限切れワークスペースを確認できません: {err}"))?;
+    if expired.server_ids.is_empty() {
+        return Ok(expired.server_ids);
+    }
+    let profiles = train_launcher_core::profile::list_profiles().map_err(|err| err.to_string())?;
+    let pending: Vec<_> = expired.server_ids.iter().filter(|id| {
+        profiles.iter().any(|profile| {
+            profile.id == format!("train-{id}") && profile.server_id.as_deref() == Some(id.as_str())
+                && profile.source == train_launcher_core::profile::ProfileSource::Train
+                && profile.workspace_server
+        })
+    }).collect();
+    if pending.is_empty() {
+        return Ok(expired.server_ids);
+    }
+    let _activity = app_handle.state::<GameActivity>().begin_file_operation()
+        .map_err(|err| format!("期限切れワークスペースの整理待ちです。Minecraftを終了して再試行してください: {err}"))?;
+    for id in pending {
+        train_launcher_core::profile::remove_expired_workspace(id).map_err(|err| {
+            format!("期限切れワークスペース {id} の削除に失敗しました。保存先を確認して再試行してください: {err}")
+        })?;
+    }
+    Ok(expired.server_ids)
 }
 
 /// 指定サーバーの設定(接続先・Minecraftバージョン・Modローダー・Mod/リソースパックURL一覧)
@@ -1198,8 +1242,12 @@ async fn launch_profile(
 /// (TRAiN以外のプロファイルでは常に空)。
 #[tauri::command]
 async fn launch_minecraft(app_handle: AppHandle, profile_id: String) -> Result<Vec<String>, String> {
+    let expired = reconcile_expired_workspaces(&app_handle).await?;
     let activity = app_handle.state::<GameActivity>().begin_launch()?;
     let current = train_launcher_core::profile::get_profile(&profile_id).map_err(|err| err.to_string())?;
+    if current.server_id.as_ref().is_some_and(|id| expired.contains(id)) {
+        return Err("このワークスペースは期限切れです。サーバー一覧を更新してください".into());
+    }
     train_launcher_core::backup::ensure_restore_complete(&current.effective_game_dir(&game_data::shared_root()?))
         .map_err(|err| err.to_string())?;
     if let Some(server_id) = train_server_id(&current) {
@@ -1359,6 +1407,10 @@ async fn join_train_server(
     server_id: String,
     server_name: String,
 ) -> Result<Vec<String>, String> {
+    let expired = reconcile_expired_workspaces(&app_handle).await?;
+    if expired.contains(&server_id) {
+        return Err("このワークスペースは期限切れです。サーバー一覧を更新してください".into());
+    }
     let activity = app_handle.state::<GameActivity>().begin_launch()?;
     let (profile, download_warnings) =
         sync_train_server_profile(&app_handle, server_id, server_name).await?;
@@ -1390,10 +1442,15 @@ async fn sync_train_server_profile(
         },
     );
 
-    let discord_access_token = current_discord_token(&app_handle)
-        .await?
-        .map(|record| record.access_token);
-    let client = train_launcher_server_api::create_client(discord_access_token);
+    let token = current_discord_token(app_handle).await?
+        .ok_or_else(|| "Discordでサインインしてください".to_string())?;
+    let user_id = token.user_id.ok_or_else(|| {
+        "ワークスペースの所属確認のためDiscordで再サインインしてください".to_string()
+    })?;
+    let client = train_launcher_server_api::create_client(Some(token.access_token));
+    let membership = client.get_member_servers(&user_id).await.map_err(|err| err.to_string())?;
+    let workspace = membership.iter().find(|server| server.id == server_id)
+        .filter(|server| server.environment.as_deref() == Some("workspace"));
     let server_config = client
         .get_server_config(&server_id)
         .await
@@ -1409,6 +1466,34 @@ async fn sync_train_server_profile(
     // ことだったと判明したため、`ensure_isolated_game_dir`側で同期前に必ずフォルダを
     // 作成するよう修正した上で再度有効化した。
     let profile_id = format!("train-{server_id}");
+    let production = if let Some(workspace) = workspace {
+        let parent = workspace.parent_server_id.as_deref()
+            .filter(|id| !id.is_empty() && *id != server_id)
+            .ok_or_else(|| "ワークスペースの本番サーバーIDがありません。管理者に確認してください".to_string())?;
+        let source = train_launcher_core::profile::get_profile(&format!("train-{parent}"))
+            .map_err(|err| format!("本番サーバーのプロファイルがありません。先に本番サーバーを一度起動してください: {err}"))?;
+        if source.server_id.as_deref() != Some(parent)
+            || source.source != ProfileSource::Train
+            || source.workspace_server
+        {
+            return Err("本番サーバーのプロファイルが正しくありません。先に本番サーバーを起動してください".into());
+        }
+        let root = minecraft_root();
+        let version = train_launcher_core::game_settings::minecraft_version(
+            &source.minecraft_version, &root,
+        ).map_err(|err| err.to_string())?;
+        if version != server_config.minecraft_version {
+            return Err(format!("本番サーバーとワークスペースのMinecraftバージョンが異なります ({version} / {})。管理者に確認してください", server_config.minecraft_version));
+        }
+        let directory = source.effective_game_dir(&root);
+        train_launcher_core::backup::ensure_restore_complete(&directory)
+            .map_err(|err| err.to_string())?;
+        train_launcher_core::game_settings::read_options(&directory)
+            .map_err(|err| format!("本番サーバーのoptions.txtがありません。先に本番サーバーを起動して設定を保存してください: {err}"))?;
+        Some(directory)
+    } else {
+        None
+    };
     // 既存プロファイルがあれば、servers.dat上の同一エントリを判別するために前回登録した
     // アドレス・options.txt上で既に自動有効化済みのリソースパック一覧・前回インストールした
     // 管理ファイル一覧・割り当て済みの隔離フォルダを引き継ぐ(新規プロファイル作成時は
@@ -1423,6 +1508,11 @@ async fn sync_train_server_profile(
         Err(train_launcher_core::CoreError::ProfileNotFound(_)) => None,
         Err(err) => return Err(err.to_string()),
     };
+    if previous_profile.as_ref().is_some_and(|previous| previous.workspace_server)
+        && workspace.is_none()
+    {
+        return Err("このワークスペースの所属を確認できません。期限切れの整理が完了するまで再試行してください".into());
+    }
     let profile = Profile {
         id: profile_id.clone(),
         name: server_name,
@@ -1432,6 +1522,9 @@ async fn sync_train_server_profile(
         // 常に最新の安定版を自動選択する。
         mod_loader_version: None,
         server_id: Some(server_id),
+        workspace_server: workspace.is_some(),
+        auto_created_workspace: workspace.is_some()
+            && previous_profile.as_ref().is_none_or(|previous| previous.auto_created_workspace),
         game_dir: previous_profile
             .as_ref()
             .and_then(|profile| profile.game_dir.clone()),
@@ -1473,6 +1566,10 @@ async fn sync_train_server_profile(
     let profile_game_dir = profile.effective_game_dir(&minecraft_root());
     train_launcher_core::backup::ensure_restore_complete(&profile_game_dir)
         .map_err(|err| err.to_string())?;
+    if let Some(source_dir) = production {
+        train_launcher_core::game_settings::import_options(&source_dir, &profile_game_dir)
+            .map_err(|err| format!("本番サーバーの標準設定をワークスペースへ取り込めませんでした: {err}"))?;
+    }
 
     // このプロファイル自身について、サーバー側でMod構成が変更され今回のURL一覧に
     // 含まれなくなったファイルがあれば、専用フォルダから削除する。判定は「管理ファイル

@@ -59,6 +59,11 @@ pub struct Profile {
     /// TRAiNの所属サーバーから自動取得したプロファイルの場合、そのサーバーID。
     #[serde(default)]
     pub server_id: Option<String>,
+    #[serde(default)]
+    pub workspace_server: bool,
+    /// Only launcher-created workspace directories may be removed on expiry.
+    #[serde(default)]
+    pub auto_created_workspace: bool,
     /// このプロファイル専用のゲームディレクトリ(Mod・リソースパック・セーブデータ・
     /// `options.txt` 等の実際の保存先)。
     ///
@@ -193,6 +198,8 @@ fn official_to_profile(official: OfficialProfile) -> Profile {
         mod_loader: None,
         mod_loader_version: None,
         server_id: None,
+        workspace_server: false,
+        auto_created_workspace: false,
         game_dir: official.game_dir,
         java_path: official.java_dir,
         max_memory_mb,
@@ -265,7 +272,14 @@ pub fn get_profile(id: &str) -> Result<Profile, CoreError> {
 pub fn update_profile(profile: Profile) -> Result<(), CoreError> {
     let mut profiles = load_all()?;
     match profiles.iter().position(|existing| existing.id == profile.id) {
-        Some(index) => profiles[index] = profile.clone(),
+        Some(index) => {
+            let mut updated = profile.clone();
+            if profiles[index].workspace_server && updated.server_id == profiles[index].server_id {
+                updated.workspace_server = true;
+                updated.auto_created_workspace = profiles[index].auto_created_workspace;
+            }
+            profiles[index] = updated;
+        }
         None => profiles.push(profile.clone()),
     }
     save_all(&profiles)?;
@@ -305,7 +319,6 @@ pub fn delete_profile(id: &str) -> Result<(), CoreError> {
     if existed_in_train_store {
         save_all(&profiles)?;
     }
-
     let removed_from_official = launcher_profiles::remove_profile(&minecraft_root(), id)
         .unwrap_or_else(|err| {
             eprintln!("failed to remove profile from launcher_profiles.json: {err}");
@@ -314,6 +327,126 @@ pub fn delete_profile(id: &str) -> Result<(), CoreError> {
 
     if !existed_in_train_store && !removed_from_official {
         return Err(CoreError::ProfileNotFound(id.to_string()));
+    }
+    Ok(())
+}
+
+/// Delete only the owned, isolated workspace directory and its managed entries.
+/// Keep the local record on failure so the next reconciliation can retry.
+pub fn remove_expired_workspace(server_id: &str) -> Result<(), CoreError> {
+    let id = format!("train-{server_id}");
+    let mut profiles = load_all()?;
+    let Some(index) = profiles.iter().position(|profile| {
+        profile.id == id && profile.server_id.as_deref() == Some(server_id)
+            && profile.source == ProfileSource::Train && profile.workspace_server
+    }) else {
+        return Ok(());
+    };
+    let expected = crate::paths::profile_game_dir(&id);
+    let all_profiles = list_profiles()?;
+    if can_remove_workspace_directory(&profiles[index], &profiles, &expected)
+        && !is_directory_shared(&all_profiles, &id, &expected)?
+    {
+        remove_owned_directory(&expected)?;
+    }
+    launcher_profiles::remove_profile(&minecraft_root(), &id)?;
+    profiles.remove(index);
+    save_all(&profiles)?;
+    Ok(())
+}
+
+fn is_directory_shared(profiles: &[Profile], id: &str, expected: &std::path::Path) -> Result<bool, CoreError> {
+    let target = match std::fs::canonicalize(expected) {
+        Ok(path) => path,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => return Err(err.into()),
+    };
+    for other in profiles.iter().filter(|profile| profile.id != id) {
+        if let Some(game_dir) = other.game_dir.as_deref() {
+            match std::fs::canonicalize(game_dir) {
+                Ok(path) if path == target => return Ok(true),
+                Ok(_) => {}
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => return Err(err.into()),
+            }
+        }
+    }
+    Ok(false)
+}
+
+fn can_remove_workspace_directory(
+    profile: &Profile,
+    profiles: &[Profile],
+    expected: &std::path::Path,
+) -> bool {
+    profile.auto_created_workspace
+        && profile.game_dir.as_deref().map(std::path::Path::new) == Some(expected)
+        && !profiles.iter().any(|other| {
+            other.id != profile.id
+                && other.game_dir.as_deref().map(std::path::Path::new) == Some(expected)
+        })
+}
+
+fn remove_owned_directory(path: &std::path::Path) -> Result<(), CoreError> {
+    fn check_tree(path: &std::path::Path) -> Result<(), CoreError> {
+        let metadata = std::fs::symlink_metadata(path)?;
+        #[cfg(windows)]
+        let reparse = {
+            use std::os::windows::fs::MetadataExt;
+            metadata.file_attributes() & 0x400 != 0
+        };
+        #[cfg(not(windows))]
+        let reparse = metadata.file_type().is_symlink();
+        if reparse {
+            return Err(CoreError::GameSettings(format!(
+                "シンボリックリンクを含むため自動削除できません: {}", path.display()
+            )));
+        }
+        if metadata.is_dir() {
+            if path.file_name().is_some_and(|name| name == "backups" || name == "backup") {
+                return Err(CoreError::GameSettings(format!(
+                    "バックアップを含むため自動削除できません: {}", path.display()
+                )));
+            }
+            for entry in std::fs::read_dir(path)? {
+                check_tree(&entry?.path())?;
+            }
+        } else if metadata.is_file()
+            && path.file_name().and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("backup_") && name.ends_with(".zip"))
+        {
+            return Err(CoreError::GameSettings(format!(
+                "バックアップを含むため自動削除できません: {}", path.display()
+            )));
+        } else if !metadata.is_file() {
+            return Err(CoreError::GameSettings(format!(
+                "通常のファイル以外は自動削除できません: {}", path.display()
+            )));
+        }
+        Ok(())
+    }
+    for ancestor in path.ancestors().skip(1).filter(|ancestor| ancestor.parent().is_some()) {
+        let metadata = std::fs::symlink_metadata(ancestor)?;
+        #[cfg(windows)]
+        let reparse = {
+            use std::os::windows::fs::MetadataExt;
+            metadata.file_attributes() & 0x400 != 0
+        };
+        #[cfg(not(windows))]
+        let reparse = metadata.file_type().is_symlink();
+        if reparse {
+            return Err(CoreError::GameSettings(format!(
+                "保存先の親フォルダーがリンクのため自動削除できません: {}", ancestor.display()
+            )));
+        }
+    }
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => {
+            check_tree(path)?;
+            std::fs::remove_dir_all(path)?;
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err.into()),
     }
     Ok(())
 }
@@ -492,6 +625,8 @@ mod tests {
             mod_loader: None,
             mod_loader_version: None,
             server_id: None,
+            workspace_server: false,
+            auto_created_workspace: false,
             game_dir: game_dir.map(str::to_string),
             java_path: None,
             max_memory_mb: None,
@@ -502,6 +637,71 @@ mod tests {
             managed_mod_filenames: Vec::new(),
             managed_resource_pack_filenames: Vec::new(),
         }
+    }
+
+    #[test]
+    fn expired_cleanup_requires_owned_unshared_default_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let expected = dir.path().join("train-workspace");
+        let mut workspace = sample_profile(Some(expected.to_str().unwrap()));
+        workspace.id = "train-workspace".into();
+        workspace.workspace_server = true;
+        workspace.auto_created_workspace = true;
+        assert!(can_remove_workspace_directory(&workspace, &[workspace.clone()], &expected));
+
+        let mut shared = sample_profile(Some(expected.to_str().unwrap()));
+        shared.id = "another".into();
+        assert!(!can_remove_workspace_directory(&workspace, &[workspace.clone(), shared], &expected));
+        workspace.game_dir = Some(dir.path().join("custom").display().to_string());
+        assert!(!can_remove_workspace_directory(&workspace, &[workspace.clone()], &expected));
+        workspace.game_dir = Some(expected.display().to_string());
+        workspace.auto_created_workspace = false;
+        assert!(!can_remove_workspace_directory(&workspace, &[workspace.clone()], &expected));
+    }
+
+    #[test]
+    fn expired_cleanup_does_not_remove_directory_used_by_another_profile_alias() {
+        let dir = tempfile::tempdir().unwrap();
+        let expected = dir.path().join("workspace");
+        std::fs::create_dir_all(&expected).unwrap();
+        let mut other = sample_profile(Some(&dir.path().join("workspace").join("..").join("workspace").display().to_string()));
+        other.id = "other".into();
+        assert!(is_directory_shared(&[other], "train-workspace", &expected).unwrap());
+        assert!(!is_directory_shared(&[], "train-workspace", &expected).unwrap());
+    }
+
+    #[test]
+    fn expired_cleanup_rejects_links_without_touching_targets() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("workspace");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("keep.txt"), "keep").unwrap();
+        #[cfg(windows)]
+        let link = std::os::windows::fs::symlink_dir(&outside, workspace.join("linked"));
+        #[cfg(not(windows))]
+        let link = std::os::unix::fs::symlink(&outside, workspace.join("linked"));
+        if link.is_err() {
+            return; // Windows developer mode may not allow symlink creation.
+        }
+        assert!(remove_owned_directory(&workspace).is_err());
+        assert!(outside.join("keep.txt").exists());
+        assert!(workspace.exists());
+    }
+
+    #[test]
+    fn expired_cleanup_removes_only_ordinary_workspace_data_and_refuses_backups() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir_all(workspace.join("mods")).unwrap();
+        std::fs::write(workspace.join("mods").join("managed.jar"), "mod").unwrap();
+        remove_owned_directory(&workspace).unwrap();
+        assert!(!workspace.exists());
+        std::fs::create_dir_all(workspace.join("backups")).unwrap();
+        std::fs::write(workspace.join("backups").join("keep"), "backup").unwrap();
+        assert!(remove_owned_directory(&workspace).is_err());
+        assert!(workspace.join("backups").join("keep").exists());
     }
 
     #[test]

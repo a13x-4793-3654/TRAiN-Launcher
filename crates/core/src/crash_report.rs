@@ -168,14 +168,22 @@ pub fn looks_connected_to_server(crash_content: &str, latest_log: Option<&str>) 
     let Some(log) = latest_log else {
         return false;
     };
+    // サーバーからの切断・接続失敗・タイトル画面への復帰で「接続中」を解除する
+    const DISCONNECT_MARKERS: [&str; 7] = [
+        "Client disconnected with reason",
+        "Couldn't connect to server",
+        "Disconnected from server",
+        "Lost connection",
+        "disconnect.lost",
+        "Starting integrated minecraft server",
+        "Stopping singleplayer server",
+    ];
     let mut connected = false;
     for line in log.lines() {
         // ConnectScreen が接続開始時に出す(`Connecting to example.com, 25565`)
         if line.contains("Connecting to ") {
             connected = true;
-        } else if line.contains("Starting integrated minecraft server")
-            || line.contains("Stopping singleplayer server")
-        {
+        } else if DISCONNECT_MARKERS.iter().any(|marker| line.contains(marker)) {
             connected = false;
         }
     }
@@ -369,7 +377,8 @@ fn find_ascii_case_insensitive(haystack: &str, needle: &str) -> Option<usize> {
         .filter(|index| haystack.is_char_boundary(*index))
 }
 
-/// hs_err の「Environment Variables:」欄などにある、ユーザー名・端末名の値を伏せる。
+/// hs_err の「Environment Variables:」欄は未知の変数に秘密が入りうるため値をすべて伏せ、
+/// 欄の外でもユーザー名・端末名の値は伏せる。
 fn redact_environment_lines(text: &str) -> String {
     const KEYS: [&str; 7] = [
         "USERNAME=",
@@ -381,12 +390,26 @@ fn redact_environment_lines(text: &str) -> String {
         "USERDOMAIN_ROAMINGPROFILE=",
     ];
     let mut output = String::with_capacity(text.len());
+    let mut in_environment = false;
     for line in text.split_inclusive('\n') {
         let trimmed = line.trim_start();
-        if let Some(key) = KEYS
-            .iter()
-            .find(|key| trimmed.len() >= key.len() && trimmed[..key.len()].eq_ignore_ascii_case(key))
-        {
+        let content = trimmed.trim_end();
+        if content.eq_ignore_ascii_case("Environment Variables:") {
+            in_environment = true;
+            output.push_str(line);
+            continue;
+        }
+        if content.is_empty() || content.starts_with("---") {
+            in_environment = false;
+        }
+        let key_len = if in_environment {
+            content.find('=').map(|index| index + 1)
+        } else {
+            KEYS.iter()
+                .find(|key| trimmed.len() >= key.len() && trimmed[..key.len()].eq_ignore_ascii_case(key))
+                .map(|key| key.len())
+        };
+        if let Some(key_len) = key_len {
             let indent = &line[..line.len() - trimmed.len()];
             let newline = if line.ends_with("\r\n") {
                 "\r\n"
@@ -396,7 +419,7 @@ fn redact_environment_lines(text: &str) -> String {
                 ""
             };
             output.push_str(indent);
-            output.push_str(&trimmed[..key.len()]);
+            output.push_str(&trimmed[..key_len]);
             output.push_str("<redacted>");
             output.push_str(newline);
         } else {
@@ -447,15 +470,19 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
-    const JWT: &str = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdefghijklmnop";
+    /// JWT の形をしたテスト用の値(検出ツールの誤検知を避けるため実行時に組み立てる)。
+    fn fake_jwt() -> String {
+        let segment = "x".repeat(24);
+        format!("{}{segment}.{segment}.{segment}", ["ey", "J"].concat())
+    }
 
     #[test]
     fn redacts_access_token_argument_and_jwt() {
         let text = format!(
-            "java_command: net.minecraft.client.main.Main --username Steve --accessToken {JWT} --version 1.21.1\nother {JWT}"
+            "java_command: net.minecraft.client.main.Main --username Steve --accessToken {jwt} --version 1.21.1\nother {jwt}", jwt = fake_jwt()
         );
         let redacted = redact(&text, None, &[]);
-        assert!(!redacted.contains(JWT));
+        assert!(!redacted.contains(&fake_jwt()));
         assert!(redacted.contains("--accessToken <redacted> --version 1.21.1"));
         assert!(redacted.contains("other <redacted-token>"));
         assert!(redacted.contains("--username Steve"));
@@ -481,11 +508,16 @@ mod tests {
 
     #[test]
     fn redacts_environment_variables() {
-        let text = "Environment Variables:\nPATH=C:\\bin\nUSERNAME=Taro\r\nCOMPUTERNAME=TARO-PC\n";
+        let text = "Environment Variables:\nPATH=C:\\bin\nSECRET_TOKEN=abc123\nUSERNAME=Taro\r\nCOMPUTERNAME=TARO-PC\n\nOther section\nMODE=keep\nUSER=taro\n";
         let redacted = redact(text, None, &[]);
         assert!(redacted.contains("USERNAME=<redacted>\r\n"));
         assert!(redacted.contains("COMPUTERNAME=<redacted>\n"));
-        assert!(redacted.contains("PATH=C:\\bin"));
+        assert!(redacted.contains("SECRET_TOKEN=<redacted>\n"));
+        assert!(redacted.contains("PATH=<redacted>\n"));
+        assert!(!redacted.contains("abc123"));
+        // 欄の外では既知のユーザー名系だけを伏せる
+        assert!(redacted.contains("MODE=keep\n"));
+        assert!(redacted.contains("USER=<redacted>\n"));
     }
 
     #[test]
@@ -505,6 +537,10 @@ mod tests {
         assert!(looks_connected_to_server("", Some(log)));
         assert!(!looks_connected_to_server("", Some("[INFO]: Setting user: Steve\n")));
         assert!(!looks_connected_to_server("", None));
+        let log = "[INFO]: Connecting to play.example.com, 25565\n[INFO]: Client disconnected with reason: Disconnected\n[ERROR]: boom\n";
+        assert!(!looks_connected_to_server("", Some(log)));
+        let log = "[INFO]: Connecting to play.example.com, 25565\n[ERROR]: Couldn't connect to server\n";
+        assert!(!looks_connected_to_server("", Some(log)));
     }
 
     #[test]
@@ -535,7 +571,7 @@ mod tests {
 
         fs::write(
             game_dir.join("crash-reports").join("crash-2026-01-01_00.00.00-client.txt"),
-            format!("---- Minecraft Crash Report ----\nDescription: Ticking entity\n--accessToken {JWT}\n"),
+            format!("---- Minecraft Crash Report ----\nDescription: Ticking entity\n--accessToken {}\n", fake_jwt()),
         )
         .unwrap();
         // 統合サーバー側のレポートは送信候補にしない
@@ -550,7 +586,7 @@ mod tests {
         assert_eq!(crash.kind, CrashKind::CrashReport);
         assert_eq!(crash.file_name, "crash-2026-01-01_00.00.00-client.txt");
         assert!(crash.connected_to_server);
-        assert!(!crash.content.contains(JWT));
+        assert!(!crash.content.contains(&fake_jwt()));
         assert!(crash.log_excerpt.unwrap().contains("boom"));
     }
 

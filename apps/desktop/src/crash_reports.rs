@@ -140,18 +140,36 @@ pub fn list_pending_crash_reports(state: State<'_, PendingCrashReports>) -> Vec<
     state.0.lock().unwrap_or_else(|err| err.into_inner()).clone()
 }
 
-/// ユーザーが同意したクラッシュレポートをTRAiNへ送信する。成功したら送信待ちから外す。
+/// ユーザーが同意したクラッシュレポートをTRAiNへ送信する。
+///
+/// 同時に押された場合の二重送信を防ぐため、送信前に送信待ちからアトミックに取り出し、
+/// 失敗した場合だけ元に戻す。
 #[tauri::command]
 pub async fn submit_crash_report(app_handle: AppHandle, id: String) -> Result<String, String> {
     let pending = {
         let state = app_handle.state::<PendingCrashReports>();
-        let list = state.0.lock().unwrap_or_else(|err| err.into_inner());
-        list.iter()
-            .find(|item| item.id == id)
-            .cloned()
-            .ok_or_else(|| "送信するクラッシュレポートが見つかりません".to_string())?
+        let mut list = state.0.lock().unwrap_or_else(|err| err.into_inner());
+        let index = list
+            .iter()
+            .position(|item| item.id == id)
+            .ok_or_else(|| "送信するクラッシュレポートが見つかりません(送信済みの可能性があります)".to_string())?;
+        list.remove(index)
     };
-    let discord_access_token = crate::current_discord_token(&app_handle)
+    match send(&app_handle, &pending).await {
+        Ok(receipt_id) => Ok(receipt_id),
+        Err(err) => {
+            let state = app_handle.state::<PendingCrashReports>();
+            let mut list = state.0.lock().unwrap_or_else(|err| err.into_inner());
+            if !list.iter().any(|item| item.id == pending.id) {
+                list.insert(0, pending);
+            }
+            Err(err)
+        }
+    }
+}
+
+async fn send(app_handle: &AppHandle, pending: &PendingCrashReport) -> Result<String, String> {
+    let discord_access_token = crate::current_discord_token(app_handle)
         .await?
         .ok_or_else(|| "Discordアカウントでサインインしてください".to_string())?
         .access_token;
@@ -160,7 +178,6 @@ pub async fn submit_crash_report(app_handle: AppHandle, id: String) -> Result<St
         .submit_crash_report(&pending.server_id, &pending.to_submission())
         .await
         .map_err(|err| err.to_string())?;
-    remove(&app_handle, &id);
     Ok(receipt.id)
 }
 

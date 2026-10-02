@@ -24,6 +24,7 @@ use game_activity::GameActivity;
 
 const DISCORD_REFRESH_MARGIN_SECS: i64 = 5 * 60;
 const DISCORD_REFRESH_CHECK_INTERVAL: Duration = Duration::from_secs(60);
+const WORKSPACE_RECONCILIATION_WARNING_EVENT: &str = "workspace://reconciliation-warning";
 
 #[derive(Default)]
 struct DiscordCredentials(tokio::sync::Mutex<()>);
@@ -161,9 +162,8 @@ async fn sign_in_with_discord(app_handle: AppHandle) -> Result<SignInResult, Str
     )
     .map_err(|err| err.to_string())?;
     drop(_guard);
-    reconcile_expired_workspaces(&app_handle).await.map_err(|err| {
-        format!("Discordへのサインインは完了しましたが、ワークスペースの整理に失敗しました。再試行してください: {err}")
-    })?;
+    let reconciliation = reconcile_expired_workspaces(&app_handle).await;
+    emit_workspace_warning(&app_handle, reconciliation.warning);
 
     Ok(SignInResult {
         display_name: token.username,
@@ -353,8 +353,11 @@ fn save_app_settings(
 
 /// 保存済みプロファイル一覧を取得する。
 #[tauri::command]
-async fn list_profiles(app_handle: AppHandle) -> Result<Vec<train_launcher_core::profile::Profile>, String> {
-    reconcile_expired_workspaces(&app_handle).await?;
+async fn list_profiles(
+    app_handle: AppHandle,
+) -> Result<Vec<train_launcher_core::profile::Profile>, String> {
+    let reconciliation = reconcile_expired_workspaces(&app_handle).await;
+    emit_workspace_warning(&app_handle, reconciliation.warning);
     train_launcher_core::profile::list_profiles().map_err(|err| err.to_string())
 }
 
@@ -432,7 +435,8 @@ async fn list_mod_loader_versions(
 async fn list_member_servers(
     app_handle: AppHandle,
 ) -> Result<Vec<train_launcher_server_api::MemberServer>, String> {
-    let expired = reconcile_expired_workspaces(&app_handle).await?;
+    let reconciliation = reconcile_expired_workspaces(&app_handle).await;
+    emit_workspace_warning(&app_handle, reconciliation.warning);
     let discord_token = current_discord_token(&app_handle)
         .await?
         .ok_or_else(|| "Discordアカウントでサインインしてください".to_string())?;
@@ -450,44 +454,146 @@ async fn list_member_servers(
         .get_member_servers(&discord_user_id)
         .await
         .map_err(|err| err.to_string())?;
-    servers.retain(|server| !expired.contains(&server.id));
+    servers.retain(|server| !reconciliation.expired_server_ids.contains(&server.id));
     Ok(servers)
 }
 
-async fn reconcile_expired_workspaces(app_handle: &AppHandle) -> Result<Vec<String>, String> {
-    let Some(token) = current_discord_token(app_handle).await? else {
-        return Ok(Vec::new());
+#[derive(Default)]
+struct WorkspaceReconciliation {
+    expired_server_ids: Vec<String>,
+    failed_server_ids: Vec<String>,
+    warning: Option<String>,
+}
+
+async fn reconcile_expired_workspaces(app_handle: &AppHandle) -> WorkspaceReconciliation {
+    let token = match current_discord_token(app_handle).await {
+        Ok(Some(token)) => token,
+        Ok(None) => return WorkspaceReconciliation::default(),
+        Err(err) => {
+            return WorkspaceReconciliation {
+                warning: Some(format!(
+                    "ワークスペースの期限を確認できませんでした。データは削除せず、再試行します: {err}"
+                )),
+                ..WorkspaceReconciliation::default()
+            }
+        }
     };
-    let user_id = token.user_id.ok_or_else(|| {
-        "ワークスペースの期限を確認するため、Discordで再サインインしてください".to_string()
-    })?;
+    let Some(user_id) = token.user_id else {
+        return WorkspaceReconciliation {
+            warning: Some("Discordアカウント情報が古いため、ワークスペースの期限を確認できません。再サインインしてください。".to_string()),
+            ..WorkspaceReconciliation::default()
+        };
+    };
     let client = train_launcher_server_api::create_client(Some(token.access_token));
-    let expired = client
-        .get_expired_workspaces(&user_id)
-        .await
-        .map_err(|err| format!("期限切れワークスペースを確認できません: {err}"))?;
+    let expired = match client.get_expired_workspaces(&user_id).await {
+        Ok(expired) => expired,
+        Err(err) => return workspace_lookup_failure(err),
+    };
     if expired.server_ids.is_empty() {
-        return Ok(expired.server_ids);
+        return WorkspaceReconciliation::default();
     }
-    let profiles = train_launcher_core::profile::list_profiles().map_err(|err| err.to_string())?;
-    let pending: Vec<_> = expired.server_ids.iter().filter(|id| {
-        profiles.iter().any(|profile| {
-            profile.id == format!("train-{id}") && profile.server_id.as_deref() == Some(id.as_str())
-                && profile.source == train_launcher_core::profile::ProfileSource::Train
-                && profile.workspace_server
+    let profiles = match train_launcher_core::profile::list_profiles() {
+        Ok(profiles) => profiles,
+        Err(err) => return WorkspaceReconciliation {
+            failed_server_ids: expired.server_ids.clone(),
+            expired_server_ids: expired.server_ids,
+            warning: Some(format!("期限切れワークスペースのローカル状態を確認できません。データは削除せず、再試行します: {err}")),
+        },
+    };
+    let pending: Vec<String> = expired
+        .server_ids
+        .iter()
+        .filter(|id| {
+            profiles.iter().any(|profile| {
+                profile.id == format!("train-{id}")
+                    && profile.server_id.as_deref() == Some(id.as_str())
+                    && profile.source == train_launcher_core::profile::ProfileSource::Train
+                    && profile.workspace_server
+            })
         })
-    }).collect();
+        .cloned()
+        .collect();
     if pending.is_empty() {
-        return Ok(expired.server_ids);
+        return WorkspaceReconciliation {
+            expired_server_ids: expired.server_ids,
+            ..WorkspaceReconciliation::default()
+        };
     }
-    let _activity = app_handle.state::<GameActivity>().begin_file_operation()
-        .map_err(|err| format!("期限切れワークスペースの整理待ちです。Minecraftを終了して再試行してください: {err}"))?;
-    for id in pending {
-        train_launcher_core::profile::remove_expired_workspace(id).map_err(|err| {
-            format!("期限切れワークスペース {id} の削除に失敗しました。保存先を確認して再試行してください: {err}")
-        })?;
+    let _activity = match app_handle.state::<GameActivity>().begin_file_operation() {
+        Ok(activity) => activity,
+        Err(err) => {
+            return WorkspaceReconciliation {
+                failed_server_ids: pending,
+                expired_server_ids: expired.server_ids,
+                warning: Some(format!("Minecraftを終了してからワークスペースの期限切れ整理を再試行してください: {err}")),
+            }
+        }
+    };
+    let mut failed_server_ids = Vec::new();
+    for id in &pending {
+        if let Err(err) = train_launcher_core::profile::remove_expired_workspace(id) {
+            eprintln!("failed to remove expired workspace {id}: {err}");
+            failed_server_ids.push(id.clone());
+        }
     }
-    Ok(expired.server_ids)
+    let warning = (!failed_server_ids.is_empty()).then(|| {
+        format!(
+            "期限切れワークスペースを削除できませんでした。起動を停止し、再試行します: {}",
+            failed_server_ids.join(", ")
+        )
+    });
+    WorkspaceReconciliation {
+        expired_server_ids: expired.server_ids,
+        failed_server_ids,
+        warning,
+    }
+}
+
+fn workspace_lookup_failure(
+    error: train_launcher_server_api::TrainApiError,
+) -> WorkspaceReconciliation {
+    let warning = if matches!(&error, train_launcher_server_api::TrainApiError::NotFound) {
+        "この TRAiN API はワークスペース機能に未対応です。通常のサーバーは引き続き利用できます。ワークスペースはバックエンド更新後に表示・整理されます。".to_string()
+    } else {
+        format!("ワークスペースの期限を確認できませんでした。データは削除せず、接続回復後に再試行します: {error}")
+    };
+    WorkspaceReconciliation {
+        warning: Some(warning),
+        ..WorkspaceReconciliation::default()
+    }
+}
+
+fn emit_workspace_warning(app_handle: &AppHandle, warning: Option<String>) {
+    if let Some(warning) = warning {
+        if let Err(err) = app_handle.emit(WORKSPACE_RECONCILIATION_WARNING_EVENT, warning) {
+            eprintln!("failed to emit workspace reconciliation warning: {err}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod workspace_reconciliation_tests {
+    use super::workspace_lookup_failure;
+    use train_launcher_server_api::TrainApiError;
+
+    #[test]
+    fn missing_workspace_endpoint_is_non_blocking_and_does_not_mark_ids_expired() {
+        let result = workspace_lookup_failure(TrainApiError::NotFound);
+
+        assert!(result.expired_server_ids.is_empty());
+        assert!(result
+            .warning
+            .unwrap()
+            .contains("通常のサーバーは引き続き利用できます"));
+    }
+
+    #[test]
+    fn api_errors_are_non_blocking_and_never_mark_ids_expired() {
+        let result = workspace_lookup_failure(TrainApiError::InvalidRequest);
+
+        assert!(result.expired_server_ids.is_empty());
+        assert!(result.warning.unwrap().contains("データは削除せず"));
+    }
 }
 
 /// 指定サーバーの設定(接続先・Minecraftバージョン・Modローダー・Mod/リソースパックURL一覧)
@@ -1242,10 +1348,29 @@ async fn launch_profile(
 /// (TRAiN以外のプロファイルでは常に空)。
 #[tauri::command]
 async fn launch_minecraft(app_handle: AppHandle, profile_id: String) -> Result<Vec<String>, String> {
-    let expired = reconcile_expired_workspaces(&app_handle).await?;
+    let reconciliation = reconcile_expired_workspaces(&app_handle).await;
+    let current = train_launcher_core::profile::get_profile(&profile_id)
+        .map_err(|err| err.to_string())?;
+    let is_expired = reconciliation
+        .expired_server_ids
+        .iter()
+        .any(|id| profile_id == format!("train-{id}"));
+    let cleanup_failed = reconciliation.failed_server_ids.iter().any(|id| {
+        profile_id == format!("train-{id}") || current.server_id.as_deref() == Some(id.as_str())
+    });
+    if cleanup_failed {
+        return Err(reconciliation.warning.unwrap_or_else(|| {
+            "期限切れワークスペースの整理に失敗しました。再試行してください".into()
+        }));
+    }
+    emit_workspace_warning(&app_handle, reconciliation.warning);
     let activity = app_handle.state::<GameActivity>().begin_launch()?;
-    let current = train_launcher_core::profile::get_profile(&profile_id).map_err(|err| err.to_string())?;
-    if current.server_id.as_ref().is_some_and(|id| expired.contains(id)) {
+    if is_expired
+        || current
+            .server_id
+            .as_ref()
+            .is_some_and(|id| reconciliation.expired_server_ids.contains(id))
+    {
         return Err("このワークスペースは期限切れです。サーバー一覧を更新してください".into());
     }
     train_launcher_core::backup::ensure_restore_complete(&current.effective_game_dir(&game_data::shared_root()?))
@@ -1407,8 +1532,14 @@ async fn join_train_server(
     server_id: String,
     server_name: String,
 ) -> Result<Vec<String>, String> {
-    let expired = reconcile_expired_workspaces(&app_handle).await?;
-    if expired.contains(&server_id) {
+    let reconciliation = reconcile_expired_workspaces(&app_handle).await;
+    if reconciliation.failed_server_ids.contains(&server_id) {
+        return Err(reconciliation.warning.unwrap_or_else(|| {
+            "期限切れワークスペースの整理に失敗しました。再試行してください".into()
+        }));
+    }
+    emit_workspace_warning(&app_handle, reconciliation.warning);
+    if reconciliation.expired_server_ids.contains(&server_id) {
         return Err("このワークスペースは期限切れです。サーバー一覧を更新してください".into());
     }
     let activity = app_handle.state::<GameActivity>().begin_launch()?;

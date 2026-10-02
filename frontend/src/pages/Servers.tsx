@@ -187,6 +187,24 @@ export function ServersPage() {
   }, [dispatchToast]);
 
   useEffect(() => {
+    const unlisten = listen<string>(
+      "workspace://reconciliation-warning",
+      (event) => {
+        dispatchToast(
+          <Toast>
+            <ToastTitle>ワークスペースの確認が必要です</ToastTitle>
+            <ToastBody>{event.payload}</ToastBody>
+          </Toast>,
+          { intent: "warning" },
+        );
+      },
+    );
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, [dispatchToast]);
+
+  useEffect(() => {
     const unlisten = listen<LaunchProgressPayload>(
       LAUNCH_PROGRESS_EVENT,
       (event) => setProgress(event.payload),

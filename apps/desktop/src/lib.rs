@@ -19,6 +19,7 @@ use train_launcher_auth::{config, discord, msa, xbox};
 mod crash_reports;
 mod game_activity;
 mod game_data;
+mod auth_fallback;
 
 use game_activity::GameActivity;
 
@@ -986,6 +987,15 @@ async fn launch_profile(
     profile: train_launcher_core::profile::Profile,
     activity: game_activity::ActivityLease,
 ) -> Result<(), String> {
+    launch_profile_with_fallback(app_handle, profile, activity, None).await
+}
+
+async fn launch_profile_with_fallback(
+    app_handle: AppHandle,
+    profile: train_launcher_core::profile::Profile,
+    activity: game_activity::ActivityLease,
+    fallback: Option<auth_fallback::LaunchContext>,
+) -> Result<(), String> {
     let mut profile = profile;
     let settings = train_launcher_core::settings::load_settings()
         .map_err(|err| format!("Javaの起動設定を読み込めませんでした: {err}"))?;
@@ -999,7 +1009,14 @@ async fn launch_profile(
         .cloned()
         .collect();
 
-    let token = ensure_valid_microsoft_token().await?;
+    let token = if let Some(context) = &fallback {
+        let token = store::load_token(Provider::Microsoft).map_err(|err| err.to_string())?
+            .ok_or("確認済みのMinecraftアカウントがありません。復旧後にサインインしてください")?;
+        auth_fallback::check_credential(&context.credential, &token, auth_fallback::now_ms()?)?;
+        token
+    } else {
+        ensure_valid_microsoft_token().await?
+    };
     let uuid = token.uuid.clone().ok_or_else(|| {
         "MinecraftのUUIDが取得できていません。サインアウトして再度サインインしてください"
             .to_string()
@@ -1026,12 +1043,13 @@ async fn launch_profile(
         }
     };
     java_progress("必要なJavaバージョンを確認中...");
-    let base_version = train_launcher_core::version_manifest::resolve_version(
-        &profile.minecraft_version,
-        &paths,
-    )
-    .await
-    .map_err(|err| err.to_string())?;
+    let base_version = if fallback.is_some() {
+        train_launcher_core::version_manifest::resolve_cached_version(&profile.minecraft_version, &paths).await
+            .map_err(|err| format!("ゲームの事前準備を確認してください（復旧後に通常起動）: {err}"))?
+    } else {
+        train_launcher_core::version_manifest::resolve_version(&profile.minecraft_version, &paths).await
+            .map_err(|err| err.to_string())?
+    };
     let required_java = train_launcher_core::java::required_major_version(&base_version.details)
         .map_err(|err| err.to_string())?;
     let mut java = train_launcher_core::java::ensure_runtime(
@@ -1046,7 +1064,11 @@ async fn launch_profile(
     // Modローダーが指定されている場合、`minecraft_version`(バニラ)を基準にローダーを
     // 自動導入し、以降のダウンロード/起動には導入後のバージョンID(例:
     // `fabric-loader-0.19.5-1.20.4`)を使う。未導入の場合のみ実際のインストールが走る。
-    let resolved_version = if let Some(loader_name) = profile.mod_loader.clone() {
+    let resolved_version = if fallback.is_some() {
+        let game_version = auth_fallback::cached_fabric_id(&launcher_root)?;
+        train_launcher_core::version_manifest::resolve_cached_version(&game_version, &paths).await
+            .map_err(|err| format!("Fabricの事前準備を確認してください: {err}"))?
+    } else if let Some(loader_name) = profile.mod_loader.clone() {
         let loader_kind = train_launcher_core::mod_loader::ModLoaderKind::parse(&loader_name)
             .ok_or_else(|| format!("未対応のModローダーです: {loader_name}"))?;
 
@@ -1101,10 +1123,11 @@ async fn launch_profile(
             }
         });
 
-    let resolved_version = train_launcher_core::download::download_resolved_version_files(
+    let resolved_version = train_launcher_core::download::prepare_resolved_version_files(
         resolved_version,
         &launcher_root,
         on_progress,
+        fallback.is_some(),
     )
     .await
     .map_err(|err| err.to_string())?;
@@ -1126,20 +1149,39 @@ async fn launch_profile(
     let auth = train_launcher_core::launch::LaunchAuth {
         username,
         uuid,
-        access_token: token.access_token,
+        // Do not expose a cached (possibly expired) Minecraft token to an outage launch.
+        access_token: if fallback.is_some() { "0".into() } else { token.access_token },
     };
 
     let game_dir = profile.effective_game_dir(&launcher_root);
+    let private_ticket = if let Some(context) = &fallback {
+        auth_fallback::check_companion(&game_dir, &profile.managed_mod_filenames)?;
+        let discord = current_discord_token(&app_handle).await?
+            .ok_or("Discordでサインインしてください")?;
+        if discord.user_id.as_deref() != Some(context.discord_id.as_str()) {
+            return Err("Discordアカウントが変更されました。障害時接続をやり直してください".into());
+        }
+        let client = train_launcher_server_api::create_client(Some(discord.access_token));
+        let status = client.fallback_status(&context.server_id).await.map_err(|err| err.to_string())?;
+        auth_fallback::check_status(&status, auth_fallback::now_ms()?, true)?;
+        if context.credential.expires_at <= auth_fallback::now_ms()? {
+            return Err("準備中に事前登録の期限が切れました。復旧後に再登録してください".into());
+        }
+        let ticket = client.fallback_ticket(&context.server_id, &context.credential.credential_id)
+            .await.map_err(|err| err.to_string())?;
+        Some(auth_fallback::PrivateTicket::create(&ticket, context, app_handle.state::<auth_fallback::TicketRegistry>().inner().clone())?)
+    } else { None };
     // クラッシュレポートのファイル時刻と比較するため、起動直前の時刻を少し余裕を持って記録する
     let launched_at = SystemTime::now()
         .checked_sub(Duration::from_secs(5))
         .unwrap_or(UNIX_EPOCH);
-    let mut child = train_launcher_core::launch::launch(
+    let mut child = train_launcher_core::launch::launch_with_fallback(
         &profile,
         &resolved_version,
         &launcher_root,
         &game_dir,
         &auth,
+        private_ticket.as_ref().zip(fallback.as_ref()).map(|(ticket, context)| (ticket.path.as_path(), context.address.as_str())),
     )
     .await
     .map_err(|err| err.to_string())?;
@@ -1173,7 +1215,26 @@ async fn launch_profile(
     );
 
     tauri::async_runtime::spawn(async move {
-        let exit_code = match child.wait().await {
+        // Keep the file until consumed, process exit, or expiration, whichever comes first.
+        let mut private_ticket = private_ticket;
+        let expiry_wait = async {
+            if let Some(ticket) = &private_ticket {
+                let now = match auth_fallback::now_ms() {
+                    Ok(now) => now,
+                    Err(err) => { eprintln!("failed to check auth fallback ticket expiry: {err}"); u64::MAX },
+                };
+                let delay = ticket.expires_at.saturating_sub(now);
+                tokio::time::sleep(Duration::from_millis(delay)).await;
+            } else {
+                std::future::pending::<()>().await;
+            }
+        };
+        let first_exit = tokio::select! {
+            status = child.wait() => Some(status),
+            _ = expiry_wait => None,
+        };
+        private_ticket.take();
+        let exit_code = match match first_exit { Some(status) => status, None => child.wait().await } {
             Ok(status) => status.code(),
             Err(err) => {
                 eprintln!("failed to wait for Minecraft: {err}");
@@ -1364,6 +1425,79 @@ async fn join_train_server(
         sync_train_server_profile(&app_handle, server_id, server_name).await?;
     launch_profile(app_handle, profile, activity).await?;
     Ok(download_warnings)
+}
+
+#[tauri::command]
+async fn get_auth_fallback_status(app_handle: AppHandle, server_id: String)
+    -> Result<train_launcher_server_api::fallback::FallbackStatus, String> {
+    uuid::Uuid::parse_str(&server_id).map_err(|_| "サーバーIDが不正です")?;
+    let discord = current_discord_token(&app_handle).await?.ok_or("Discordでサインインしてください")?;
+    train_launcher_server_api::create_client(Some(discord.access_token))
+        .fallback_status(&server_id).await.map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn enroll_auth_fallback(app_handle: AppHandle, server_id: String, consent: bool) -> Result<u64, String> {
+    if !consent {
+        return Err("事前登録には説明を確認した上での同意が必要です".into());
+    }
+    let credentials = app_handle.state::<auth_fallback::Credentials>();
+    let _guard = credentials.0.lock().await;
+    uuid::Uuid::parse_str(&server_id).map_err(|_| "サーバーIDが不正です")?;
+    let discord = current_discord_token(&app_handle).await?.ok_or("Discordでサインインしてください")?;
+    let discord_id = discord.user_id.ok_or("Discordで再サインインしてください")?;
+    let client = train_launcher_server_api::create_client(Some(discord.access_token));
+    let status = client.fallback_status(&server_id).await.map_err(|err| err.to_string())?;
+    auth_fallback::check_status(&status, auth_fallback::now_ms()?, false)?;
+    let token = ensure_valid_microsoft_token().await?;
+    if token.access_token.len() > 3072 {
+        return Err("Minecraft認証トークンが登録APIの上限を超えています。管理者に確認してください".into());
+    }
+    let (uuid, name) = auth_fallback::identity(&token)?;
+    let (mut credential, public_key) = auth_fallback::generate(uuid, name)?;
+    // Fail before remote registration if the OS store cannot persist the private key.
+    auth_fallback::save(&server_id, &discord_id, &credential)?;
+    let receipt = client.enroll_fallback(&server_id, &train_launcher_server_api::fallback::CredentialRequest {
+        public_key, minecraft_access_token: token.access_token,
+    }).await.map_err(|err| err.to_string())?;
+    let now = auth_fallback::now_ms()?;
+    if uuid::Uuid::parse_str(&receipt.credential_id).is_err() || receipt.expires_at <= now
+        || receipt.expires_at > now.saturating_add(7 * 24 * 60 * 60 * 1000)
+    {
+        return Err("事前登録の応答が不正です。復旧後に再登録してください".into());
+    }
+    credential.credential_id = receipt.credential_id;
+    credential.expires_at = receipt.expires_at;
+    auth_fallback::save(&server_id, &discord_id, &credential)?;
+    Ok(credential.expires_at)
+}
+
+#[tauri::command]
+async fn join_train_server_fallback(app_handle: AppHandle, server_id: String, server_name: String) -> Result<Vec<String>, String> {
+    let credentials = app_handle.state::<auth_fallback::Credentials>();
+    let _guard = credentials.0.lock().await;
+    let activity = app_handle.state::<GameActivity>().begin_launch()?;
+    let discord = current_discord_token(&app_handle).await?.ok_or("Discordでサインインしてください")?;
+    let discord_id = discord.user_id.ok_or("Discordで再サインインしてください")?;
+    let credential = auth_fallback::load(&server_id, &discord_id)?
+        .ok_or("事前登録がありません。Minecraft認証サービスの復旧後に登録してください")?;
+    let token = store::load_token(Provider::Microsoft).map_err(|err| err.to_string())?
+        .ok_or("確認済みのMinecraftアカウントがありません。復旧後にサインインしてください")?;
+    auth_fallback::check_credential(&credential, &token, auth_fallback::now_ms()?)?;
+    let client = train_launcher_server_api::create_client(Some(discord.access_token));
+    let status = client.fallback_status(&server_id).await.map_err(|err| err.to_string())?;
+    auth_fallback::check_status(&status, auth_fallback::now_ms()?, true)?;
+    let (profile, warnings) = sync_train_server_profile(&app_handle, server_id.clone(), server_name).await?;
+    if profile.minecraft_version != "1.21.1" || profile.mod_loader.as_deref() != Some("fabric") {
+        return Err("障害時接続はMinecraft 1.21.1 / Fabric専用です。管理者に配布設定を確認してください".into());
+    }
+    if !warnings.is_empty() {
+        return Err(format!("障害時接続の準備を完了できませんでした: {}", warnings.join("\n")));
+    }
+    let address = profile.last_server_address.clone().ok_or("接続先を登録できませんでした")?;
+    let context = auth_fallback::LaunchContext { server_id, discord_id, address, credential };
+    launch_profile_with_fallback(app_handle.clone(), profile, activity, Some(context)).await?;
+    Ok(warnings)
 }
 
 /// TRAiN APIから最新のサーバー設定を取得し、サーバー専用プロファイルとMod・リソース
@@ -1776,10 +1910,12 @@ async fn reset_server_profile_mods(app_handle: AppHandle, server_id: String) -> 
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .setup(|app| {
             let handle = app.handle().clone();
             app.manage(DiscordCredentials::default());
+            app.manage(auth_fallback::Credentials::default());
+            app.manage(auth_fallback::TicketRegistry::default());
             app.manage(crash_reports::PendingCrashReports::default());
             tauri::async_runtime::spawn(async move {
                 let mut interval = tokio::time::interval(DISCORD_REFRESH_CHECK_INTERVAL);
@@ -1839,6 +1975,9 @@ pub fn run() {
             remove_installed_resource_pack,
             launch_minecraft,
             join_train_server,
+            get_auth_fallback_status,
+            enroll_auth_fallback,
+            join_train_server_fallback,
             reset_server_profile_mods,
             get_app_settings,
             save_app_settings,
@@ -1846,6 +1985,11 @@ pub fn run() {
             crash_reports::submit_crash_report,
             crash_reports::dismiss_crash_report,
         ])
-        .run(tauri::generate_context!())
+        .build(tauri::generate_context!())
         .expect("error while running tauri application");
+    app.run(|handle, event| {
+        if matches!(event, tauri::RunEvent::Exit) {
+            handle.state::<auth_fallback::TicketRegistry>().cleanup();
+        }
+    });
 }

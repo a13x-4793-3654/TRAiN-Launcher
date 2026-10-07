@@ -30,6 +30,7 @@ import {
   ArrowResetRegular,
 } from "@fluentui/react-icons";
 import { invoke } from "@tauri-apps/api/core";
+import { AuthFallbackPanel } from "./AuthFallbackPanel";
 
 interface MemberServer {
   id: string;
@@ -150,6 +151,7 @@ export function ServerDetailPage(props: {
   server: MemberServer;
   onBack: () => void;
   onJoin: () => void;
+  onFallbackJoin: () => void;
   joining: boolean;
   progress: LaunchProgressPayload | null;
 }) {
@@ -253,6 +255,16 @@ export function ServerDetailPage(props: {
         >
           初期化
         </Button>
+      </div>
+
+      <div className={styles.section}>
+        <AuthFallbackPanel
+          key={props.server.id}
+          serverId={props.server.id}
+          busy={props.joining || resetting || loading || !config}
+          testMode={config?.test_mode === true}
+          onLaunch={props.onFallbackJoin}
+        />
       </div>
 
       {props.joining && (

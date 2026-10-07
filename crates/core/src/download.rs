@@ -180,6 +180,17 @@ pub async fn download_resolved_version_files(
     destination: &Path,
     on_progress: ProgressCallback,
 ) -> Result<version_manifest::ResolvedVersion, CoreError> {
+    prepare_resolved_version_files(resolved, destination, on_progress, false).await
+}
+
+/// Outage preparation reuses the cached asset index, avoiding a mandatory Mojang request.
+/// Missing/corrupt game files still require their normal verified downloads.
+pub async fn prepare_resolved_version_files(
+    resolved: version_manifest::ResolvedVersion,
+    destination: &Path,
+    on_progress: ProgressCallback,
+    cached_asset_index: bool,
+) -> Result<version_manifest::ResolvedVersion, CoreError> {
     let paths = LauncherPaths::new(destination);
     let platform = CurrentPlatform::detect();
     let client = reqwest::Client::new();
@@ -221,7 +232,7 @@ pub async fn download_resolved_version_files(
         &on_progress,
     )
     .await?;
-    download_assets(&client, &paths, &resolved.details, &on_progress).await?;
+    download_assets(&client, &paths, &resolved.details, &on_progress, cached_asset_index).await?;
 
     Ok(resolved)
 }
@@ -387,10 +398,17 @@ async fn download_assets(
     paths: &LauncherPaths,
     details: &VersionDetails,
     on_progress: &ProgressCallback,
+    cached_asset_index: bool,
 ) -> Result<(), CoreError> {
-    let asset_index = version_manifest::fetch_asset_index(&details.asset_index).await?;
-
     let index_path = paths.asset_index_path(&details.asset_index.id);
+    let asset_index = if cached_asset_index {
+        let bytes = tokio::fs::read(&index_path).await.map_err(|_| CoreError::InvalidLaunchCommand(
+            "アセット一覧が未準備です。Minecraftサービスの復旧後に通常起動してください".into()
+        ))?;
+        serde_json::from_slice(&bytes)?
+    } else {
+        version_manifest::fetch_asset_index(&details.asset_index).await?
+    };
     if let Some(parent) = index_path.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
@@ -438,4 +456,26 @@ async fn download_assets(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod fallback_asset_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn fallback_uses_cached_index_without_network_and_requires_preparation() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = LauncherPaths::new(root.path());
+        let details: VersionDetails = serde_json::from_value(serde_json::json!({
+            "id":"1.21.1", "type":"release", "mainClass":"Vanilla",
+            "assetIndex":{"id":"test","sha1":"","size":0,"url":"http://127.0.0.1:1/unreachable"},
+            "assets":"test", "downloads":{"client":{"sha1":"","size":0,"url":""}}
+        })).unwrap();
+        let progress: ProgressCallback = Arc::new(|_| {});
+        assert!(download_assets(&reqwest::Client::new(), &paths, &details, &progress, true).await.is_err());
+        let index_path = paths.asset_index_path("test");
+        std::fs::create_dir_all(index_path.parent().unwrap()).unwrap();
+        std::fs::write(&index_path, r#"{"objects":{}}"#).unwrap();
+        download_assets(&reqwest::Client::new(), &paths, &details, &progress, true).await.unwrap();
+    }
 }

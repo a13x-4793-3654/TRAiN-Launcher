@@ -26,6 +26,7 @@
 //! を参照。
 
 pub mod models;
+pub mod fallback;
 
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -42,6 +43,12 @@ pub use models::{
 /// 日本語かつユーザーが次に何をすればよいか分かる文面にする。
 #[derive(Debug, thiserror::Error)]
 pub enum TrainApiError {
+    #[error("障害時接続は利用できません。管理者による有効化と対応Modの配布を確認してください")]
+    FallbackUnavailable,
+    #[error("Minecraft認証サービスに接続できません。事前登録は復旧後に行ってください")]
+    MinecraftUnavailable,
+    #[error("Minecraftアカウントの紐づけ・本人確認または参加資格を確認してください")]
+    FallbackDenied,
     #[error("not implemented yet: {0}")]
     NotImplemented(&'static str),
     #[error("http error: {0}")]
@@ -124,6 +131,9 @@ async fn map_error_response(response: reqwest::Response) -> TrainApiError {
         .map(|body| body.error)
         .unwrap_or_default();
     match (status, code.as_str()) {
+        (409, "fallback_unavailable") => TrainApiError::FallbackUnavailable,
+        (503, "minecraft_unavailable") => TrainApiError::MinecraftUnavailable,
+        (403, "link_required" | "login_denied" | "minecraft_identity_mismatch") => TrainApiError::FallbackDenied,
         (401, _) => TrainApiError::Unauthorized,
         (403, "not_linked") => TrainApiError::NotLinked,
         (403, _) => TrainApiError::Forbidden,
@@ -146,6 +156,22 @@ async fn map_error_response(response: reqwest::Response) -> TrainApiError {
 /// TRAiNバックエンドAPIクライアントの振る舞いを定義するトレイト。
 #[async_trait]
 pub trait TrainApiClient: Send + Sync {
+    async fn fallback_status(&self, _server_id: &str) -> Result<fallback::FallbackStatus, TrainApiError> {
+        Ok(fallback::FallbackStatus {
+            available: false, enabled_until: 0, protocol: fallback::PROTOCOL.into(),
+        })
+    }
+
+    async fn enroll_fallback(&self, _server_id: &str, _request: &fallback::CredentialRequest)
+        -> Result<fallback::CredentialReceipt, TrainApiError> {
+        Err(TrainApiError::FallbackUnavailable)
+    }
+
+    async fn fallback_ticket(&self, _server_id: &str, _credential_id: &str)
+        -> Result<fallback::FallbackTicket, TrainApiError> {
+        Err(TrainApiError::FallbackUnavailable)
+    }
+
     /// Discordサインイン後、ユーザーが所属しているTRAiN管理サーバー一覧を取得する。
     async fn get_member_servers(
         &self,
@@ -332,6 +358,34 @@ impl HttpTrainApiClient {
 
 #[async_trait]
 impl TrainApiClient for HttpTrainApiClient {
+    async fn fallback_status(&self, server_id: &str) -> Result<fallback::FallbackStatus, TrainApiError> {
+        let response = self.get(&format!("/api/servers/{server_id}/auth-fallback/status")).send().await?;
+        if !response.status().is_success() {
+            return Err(map_error_response(response).await);
+        }
+        Ok(response.json().await?)
+    }
+
+    async fn enroll_fallback(&self, server_id: &str, request: &fallback::CredentialRequest)
+        -> Result<fallback::CredentialReceipt, TrainApiError> {
+        let response = self.post(&format!("/api/servers/{server_id}/auth-fallback/credentials"))
+            .json(request).send().await?;
+        if !response.status().is_success() {
+            return Err(map_error_response(response).await);
+        }
+        Ok(response.json().await?)
+    }
+
+    async fn fallback_ticket(&self, server_id: &str, credential_id: &str)
+        -> Result<fallback::FallbackTicket, TrainApiError> {
+        let response = self.post(&format!("/api/servers/{server_id}/auth-fallback/tickets"))
+            .json(&serde_json::json!({ "credential_id": credential_id })).send().await?;
+        if !response.status().is_success() {
+            return Err(map_error_response(response).await);
+        }
+        Ok(response.json().await?)
+    }
+
     async fn get_member_servers(
         &self,
         discord_user_id: &str,

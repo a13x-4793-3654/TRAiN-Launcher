@@ -191,10 +191,10 @@ export function ServersPage() {
    * 実際の参加・起動処理(サーバー設定取得〜Mod導入〜Minecraft起動)。
    * 紐づけ確認(`handleJoin`)を経た後に呼び出される。
    */
-  const proceedJoin = (server: MemberServer) => {
+  const proceedJoin = (server: MemberServer, fallback = false) => {
     setProgress(null);
     beginLaunch();
-    invoke<string[]>("join_train_server", {
+    invoke<string[]>(fallback ? "join_train_server_fallback" : "join_train_server", {
       serverId: server.id,
       serverName: server.name,
     })
@@ -330,6 +330,10 @@ export function ServersPage() {
           server={selectedServer}
           onBack={() => setSelectedServer(null)}
           onJoin={() => handleJoin(selectedServer)}
+          onFallbackJoin={() => {
+            setLaunchingId(selectedServer.id);
+            proceedJoin(selectedServer, true);
+          }}
           joining={launchingId === selectedServer.id}
           progress={progress}
         />

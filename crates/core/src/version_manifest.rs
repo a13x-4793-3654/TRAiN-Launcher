@@ -390,6 +390,18 @@ pub async fn resolve_version(
     resolve_version_with_manifest(version_id, paths, &manifest, 0).await
 }
 
+/// Resolve a previously prepared concrete version without querying Mojang.
+pub async fn resolve_cached_version(
+    version_id: &str,
+    paths: &LauncherPaths,
+) -> Result<ResolvedVersion, CoreError> {
+    let manifest = VersionManifest {
+        latest: LatestVersions { release: String::new(), snapshot: String::new() },
+        versions: Vec::new(),
+    };
+    resolve_version_with_manifest(version_id, paths, &manifest, 0).await
+}
+
 fn resolve_version_with_manifest<'a>(
     version_id: &'a str,
     paths: &'a LauncherPaths,
@@ -473,5 +485,30 @@ mod java_requirement_tests {
         });
         let merged = merge_with_parent(child, parent);
         assert_eq!(crate::java::required_major_version(&merged).unwrap(), 25);
+    }
+
+    #[tokio::test]
+    async fn cached_resolution_merges_inheritance_without_remote_manifest() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = LauncherPaths::new(root.path());
+        let vanilla = serde_json::json!({
+            "id":"1.21.1", "type":"release", "mainClass":"Vanilla",
+            "assetIndex":{"id":"test","sha1":"","size":0,"url":""}, "assets":"test",
+            "downloads":{"client":{"sha1":"","size":0,"url":""}},
+            "javaVersion":{"component":"java-runtime-delta","majorVersion":21}
+        });
+        let fabric = serde_json::json!({
+            "id":"fabric-loader-0.19.5-1.21.1", "inheritsFrom":"1.21.1", "mainClass":"KnotClient"
+        });
+        for value in [vanilla, fabric] {
+            let path = paths.version_json_path(value["id"].as_str().unwrap());
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, serde_json::to_vec(&value).unwrap()).unwrap();
+        }
+        let result = resolve_cached_version("fabric-loader-0.19.5-1.21.1", &paths).await.unwrap();
+        assert_eq!(result.details.main_class, "KnotClient");
+        assert_eq!(crate::java::required_major_version(&result.details).unwrap(), 21);
+        assert_eq!(result.source, VersionSource::Local);
+        assert!(resolve_cached_version("missing-version", &paths).await.is_err());
     }
 }

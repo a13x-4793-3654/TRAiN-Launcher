@@ -200,6 +200,18 @@ pub async fn launch(
     game_dir: &Path,
     auth: &LaunchAuth,
 ) -> Result<Child, CoreError> {
+    launch_with_fallback(profile, resolved_version, launcher_root, game_dir, auth, None).await
+}
+
+/// Explicit, server-scoped fallback only. The JVM receives a file path, never a private key.
+pub async fn launch_with_fallback(
+    profile: &Profile,
+    resolved_version: &ResolvedVersion,
+    launcher_root: &Path,
+    game_dir: &Path,
+    auth: &LaunchAuth,
+    fallback: Option<(&Path, &str)>,
+) -> Result<Child, CoreError> {
     crate::backup::ensure_restore_complete(game_dir)?;
     let required_java = crate::java::required_major_version(&resolved_version.details)?;
     let preferred: Vec<String> = profile.java_path.iter().cloned().collect();
@@ -212,13 +224,16 @@ pub async fn launch(
     .await?;
     let mut effective_profile = profile.clone();
     effective_profile.java_path = Some(java.executable.to_string_lossy().into_owned());
-    let command = build_launch_command(
+    let mut command = build_launch_command(
         &effective_profile,
         resolved_version,
         launcher_root,
         game_dir,
         auth,
     )?;
+    if let Some((ticket_path, address)) = fallback {
+        add_fallback_arguments(&mut command, ticket_path, address)?;
+    }
     let (program, args) = command
         .split_first()
         .ok_or_else(|| CoreError::InvalidLaunchCommand("launch command is empty".to_string()))?;
@@ -256,6 +271,35 @@ pub async fn launch(
     }
 
     Ok(child)
+}
+
+fn add_fallback_arguments(command: &mut Vec<String>, ticket_path: &Path, address: &str) -> Result<(), CoreError> {
+    let path = ticket_path.to_str().filter(|_| ticket_path.is_absolute())
+        .ok_or_else(|| CoreError::InvalidLaunchCommand("チケットの絶対パスが不正です".into()))?;
+    if address.is_empty() || address.chars().any(char::is_whitespace) {
+        return Err(CoreError::InvalidLaunchCommand("接続先アドレスが不正です".into()));
+    }
+    // args() performs platform-specific escaping; do not shell-quote this single argument.
+    command.insert(1, format!("-Dtrain.authFallback.ticket={path}"));
+    command.extend(["--quickPlayMultiplayer".into(), address.into()]);
+    Ok(())
+}
+
+#[cfg(test)]
+mod fallback_tests {
+    use super::*;
+
+    #[test]
+    fn ticket_path_precedes_main_and_address_is_not_normalized() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("space 日本語").join("ticket.json");
+        let mut command = vec!["java".into(), "-cp".into(), "libraries".into(), "MainClass".into()];
+        add_fallback_arguments(&mut command, &path, "Play.Example.com:25565").unwrap();
+        assert_eq!(command[1], format!("-Dtrain.authFallback.ticket={}", path.display()));
+        assert_eq!(command[4], "MainClass");
+        assert_eq!(&command[5..], &["--quickPlayMultiplayer", "Play.Example.com:25565"]);
+        assert!(add_fallback_arguments(&mut command, Path::new("relative.json"), "host").is_err());
+    }
 }
 
 /// 起動したMinecraftプロセスの標準出力/標準エラーを1行ずつ読み取り、

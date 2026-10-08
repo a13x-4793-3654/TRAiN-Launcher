@@ -35,6 +35,12 @@ import { AuthFallbackPanel } from "./AuthFallbackPanel";
 interface MemberServer {
   id: string;
   name: string;
+  environment?: "production" | "workspace";
+  expires_at?: string;
+  style?: {
+    badge: string;
+    palette: { background: string; foreground: string; border: string };
+  };
 }
 
 interface ServerConfig {
@@ -225,8 +231,19 @@ export function ServerDetailPage(props: {
 
       <Title2 as="h2" block>
         {props.server.name}
+        {props.server.environment === "workspace" && " (ワークスペース)"}
       </Title2>
       <Caption1 as="p" block>
+        {props.server.environment === "workspace" && (
+          <>
+            <Badge appearance="filled" style={props.server.style ? {
+              backgroundColor: props.server.style.palette.background,
+              color: props.server.style.palette.foreground,
+              border: `1px solid ${props.server.style.palette.border}`,
+            } : undefined}>検証</Badge>{" "}
+            {props.server.expires_at && `有効期限: ${new Date(props.server.expires_at).toLocaleString("ja-JP")} · `}
+          </>
+        )}
         {props.server.id}
       </Caption1>
 

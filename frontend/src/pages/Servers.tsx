@@ -9,6 +9,7 @@ import {
   Text,
   Card,
   CardHeader,
+  Badge,
   Toaster,
   useToastController,
   Toast,
@@ -37,6 +38,13 @@ interface AuthStatus {
 interface MemberServer {
   id: string;
   name: string;
+  environment?: "production" | "workspace";
+  parent_server_id?: string;
+  expires_at?: string;
+  style?: {
+    badge: string;
+    palette: { background: string; foreground: string; border: string };
+  };
 }
 
 interface ServerConfig {
@@ -116,6 +124,7 @@ export function ServersPage() {
   const [servers, setServers] = useState<MemberServer[]>([]);
   const [serversLoading, setServersLoading] = useState(false);
   const [serversError, setServersError] = useState<string | null>(null);
+  const [refresh, setRefresh] = useState(0);
 
   const [launchingId, setLaunchingId] = useState<string | null>(null);
   const [progress, setProgress] = useState<LaunchProgressPayload | null>(
@@ -158,7 +167,7 @@ export function ServersPage() {
       .then(setServers)
       .catch((err) => setServersError(String(err)))
       .finally(() => setServersLoading(false));
-  }, [discordSignedIn]);
+  }, [discordSignedIn, refresh]);
 
   useEffect(() => {
     const unlisten = listen<GameExitedPayload>(GAME_EXITED_EVENT, (event) => {
@@ -172,6 +181,24 @@ export function ServersPage() {
         { intent: "info" },
       );
     });
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, [dispatchToast]);
+
+  useEffect(() => {
+    const unlisten = listen<string>(
+      "workspace://reconciliation-warning",
+      (event) => {
+        dispatchToast(
+          <Toast>
+            <ToastTitle>ワークスペースの確認が必要です</ToastTitle>
+            <ToastBody>{event.payload}</ToastBody>
+          </Toast>,
+          { intent: "warning" },
+        );
+      },
+    );
     return () => {
       unlisten.then((fn) => fn());
     };
@@ -356,9 +383,12 @@ export function ServersPage() {
           ) : serversLoading ? (
             <Spinner size="small" label="サーバー一覧を取得中..." />
           ) : serversError ? (
-            <Body1 as="p" block>
-              サーバー一覧の取得に失敗しました: {serversError}
-            </Body1>
+            <>
+              <Body1 as="p" block>
+                サーバー一覧の取得に失敗しました: {serversError}
+              </Body1>
+              <Button onClick={() => setRefresh((value) => value + 1)}>再試行</Button>
+            </>
           ) : servers.length === 0 ? (
             <Body1 as="p" block>
               所属しているTRAiNサーバーが見つかりませんでした。
@@ -366,10 +396,34 @@ export function ServersPage() {
           ) : (
             <div className={styles.list}>
               {servers.map((server) => (
-                <Card key={server.id}>
+                <Card
+                  key={server.id}
+                  style={server.environment === "workspace" && server.style ? {
+                    backgroundColor: server.style.palette.background,
+                    color: server.style.palette.foreground,
+                    borderColor: server.style.palette.border,
+                    borderWidth: 1,
+                    borderStyle: "solid",
+                  } : undefined}
+                >
                   <CardHeader
-                    header={<Text weight="semibold">{server.name}</Text>}
-                    description={<Caption1>{server.id}</Caption1>}
+                    header={<Text weight="semibold" style={server.environment === "workspace" ? {
+                      color: server.style?.palette.foreground,
+                    } : undefined}>{server.name}{server.environment === "workspace" ? " (ワークスペース)" : ""}</Text>}
+                    description={<Caption1 style={server.environment === "workspace" ? {
+                      color: server.style?.palette.foreground,
+                    } : undefined}>
+                      {server.environment === "workspace" && (
+                        <><Badge appearance="filled" style={server.style ? {
+                          backgroundColor: server.style.palette.background,
+                          color: server.style.palette.foreground,
+                          border: `1px solid ${server.style.palette.border}`,
+                        } : undefined}>検証</Badge>{" "}
+                        {server.expires_at ? `有効期限: ${new Date(server.expires_at).toLocaleString("ja-JP")} · ` : ""}
+                      </>
+                      )}
+                      {server.id}
+                    </Caption1>}
                     action={
                       <div className={styles.cardActions}>
                         <Button

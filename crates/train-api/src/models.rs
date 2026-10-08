@@ -9,6 +9,52 @@ use serde::{Deserialize, Serialize};
 pub struct MemberServer {
     pub id: String,
     pub name: String,
+    #[serde(default)]
+    pub environment: Option<String>,
+    #[serde(default)]
+    pub parent_server_id: Option<String>,
+    #[serde(default)]
+    pub expires_at: Option<String>,
+    #[serde(default)]
+    pub style: Option<WorkspaceStyle>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceStyle {
+    pub badge: String,
+    pub palette: WorkspacePalette,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspacePalette {
+    pub background: String,
+    pub foreground: String,
+    pub border: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExpiredWorkspaces {
+    pub server_ids: Vec<String>,
+}
+
+#[cfg(test)]
+mod workspace_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_and_workspace_membership_deserialize() {
+        let production: MemberServer =
+            serde_json::from_str(r#"{"id":"prod","name":"Production"}"#).unwrap();
+        assert!(production.environment.is_none());
+        let workspace: MemberServer = serde_json::from_str(
+            r##"{"id":"ws","name":"Test","environment":"workspace","parent_server_id":"prod","expires_at":"2026-10-01T00:00:00Z","style":{"badge":"検証","palette":{"background":"#112233","foreground":"#ffffff","border":"#334455"}}}"##,
+        ).unwrap();
+        assert_eq!(workspace.parent_server_id.as_deref(), Some("prod"));
+        assert_eq!(workspace.style.unwrap().badge, "検証");
+        let expired: ExpiredWorkspaces =
+            serde_json::from_str(r#"{"server_ids":["ws"]}"#).unwrap();
+        assert_eq!(expired.server_ids, vec!["ws"]);
+    }
 }
 
 /// サーバーごとの設定情報(接続先・Mod構成・リソースパックなど)。

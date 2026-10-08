@@ -24,6 +24,11 @@
 //! と同じ認証・非開示ポリシー)。詳細は [`Announcement`] /
 //! [`TrainApiClient::get_global_announcements`] / [`TrainApiClient::get_server_announcements`]
 //! を参照。
+//!
+//! 個人ワークスペースは所属サーバー一覧の `environment` / `parent_server_id` /
+//! `expires_at` / `style` で区別し、期限切れ ID は本人認証付き
+//! `GET /api/members/{discord_user_id}/expired-workspaces` の `server_ids` で取得する。
+//! 一覧からの欠落は削除根拠にしない。
 
 pub mod models;
 pub mod fallback;
@@ -32,8 +37,8 @@ use async_trait::async_trait;
 use serde::Deserialize;
 
 pub use models::{
-    Announcement, CrashReportReceipt, CrashReportSubmission, LinkAccountRequest, MemberServer,
-    ServerConfig,
+    Announcement, CrashReportReceipt, CrashReportSubmission, ExpiredWorkspaces,
+    LinkAccountRequest, MemberServer, ServerConfig, WorkspacePalette, WorkspaceStyle,
 };
 
 /// train-launcher-server-api 全体で使用するエラー型。
@@ -178,6 +183,11 @@ pub trait TrainApiClient: Send + Sync {
         discord_user_id: &str,
     ) -> Result<Vec<MemberServer>, TrainApiError>;
 
+    async fn get_expired_workspaces(
+        &self,
+        discord_user_id: &str,
+    ) -> Result<ExpiredWorkspaces, TrainApiError>;
+
     /// 指定サーバーの設定(接続先・Mod構成・リソースパックなど)を取得する。
     async fn get_server_config(&self, server_id: &str) -> Result<ServerConfig, TrainApiError>;
 
@@ -227,7 +237,18 @@ impl TrainApiClient for MockTrainApiClient {
         Ok(vec![MemberServer {
             id: "mock-server-1".to_string(),
             name: "TRAiN Mock Server".to_string(),
+            environment: None,
+            parent_server_id: None,
+            expires_at: None,
+            style: None,
         }])
+    }
+
+    async fn get_expired_workspaces(
+        &self,
+        _discord_user_id: &str,
+    ) -> Result<ExpiredWorkspaces, TrainApiError> {
+        Ok(ExpiredWorkspaces { server_ids: vec![] })
     }
 
     async fn get_server_config(&self, server_id: &str) -> Result<ServerConfig, TrainApiError> {
@@ -398,6 +419,20 @@ impl TrainApiClient for HttpTrainApiClient {
             return Err(map_error_response(response).await);
         }
         Ok(response.json::<Vec<MemberServer>>().await?)
+    }
+
+    async fn get_expired_workspaces(
+        &self,
+        discord_user_id: &str,
+    ) -> Result<ExpiredWorkspaces, TrainApiError> {
+        let response = self
+            .get(&format!("/api/members/{discord_user_id}/expired-workspaces"))
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            return Err(map_error_response(response).await);
+        }
+        Ok(response.json::<ExpiredWorkspaces>().await?)
     }
 
     async fn get_server_config(&self, server_id: &str) -> Result<ServerConfig, TrainApiError> {

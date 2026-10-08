@@ -914,9 +914,8 @@ impl From<train_launcher_core::download::DownloadProgress> for LaunchProgressPay
 /// MSAアクセストークン→Minecraftアクセストークンの交換をやり直し、常に新しいトークンで
 /// 起動する(公式ランチャーと同様の挙動)。
 ///
-/// リフレッシュに失敗した場合(リフレッシュトークン自体が失効済み等)は、保存済みの
-/// 資格情報を削除した上でエラーを返す。呼び出し側は「Microsoftアカウントで再度
-/// サインインしてください」という趣旨のメッセージをそのままユーザーに表示できる。
+/// 明確なinvalid_grantだけ資格情報を削除する。一時障害では確認済み本人情報を
+/// 明示的な障害時接続用に維持するが、通常起動は必ずエラーで停止する。
 async fn ensure_valid_microsoft_token() -> Result<TokenRecord, String> {
     let token = store::load_token(Provider::Microsoft)
         .map_err(|err| err.to_string())?
@@ -931,24 +930,21 @@ async fn ensure_valid_microsoft_token() -> Result<TokenRecord, String> {
     let config = config::MicrosoftConfig::from_env().map_err(|err| err.to_string())?;
     let refresh_result = async {
         let msa_token = msa::refresh_access_token(&config, &refresh_token)
-            .await
-            .map_err(|err| err.to_string())?;
+            .await?;
+        // Preserve refresh-token rotation even if downstream Xbox/Minecraft is unavailable.
+        let mut rotated = token.clone();
+        rotated.refresh_token = msa_token.refresh_token.clone();
+        store::save_token(Provider::Microsoft, &rotated)?;
         let minecraft_token = xbox::exchange_microsoft_token(&msa_token.access_token)
-            .await
-            .map_err(|err| err.to_string())?;
-        Ok::<_, String>((msa_token, minecraft_token))
+            .await?;
+        Ok::<_, train_launcher_auth::AuthError>((msa_token, minecraft_token))
     }
     .await;
 
     let (msa_token, minecraft_token) = match refresh_result {
         Ok(result) => result,
         Err(err) => {
-            // リフレッシュトークン自体が失効している等、リフレッシュそのものが失敗した場合は
-            // 古い資格情報を残しても再利用できないため削除し、ユーザーに再サインインを促す。
-            let _ = store::delete_token(Provider::Microsoft);
-            return Err(format!(
-                "Microsoftアカウントの認証が期限切れです。再度サインインしてください({err})"
-            ));
+            return microsoft_refresh_failure(&err, || store::delete_token(Provider::Microsoft));
         }
     };
 
@@ -969,6 +965,64 @@ async fn ensure_valid_microsoft_token() -> Result<TokenRecord, String> {
     };
     store::save_token(Provider::Microsoft, &refreshed).map_err(|err| err.to_string())?;
     Ok(refreshed)
+}
+
+fn microsoft_refresh_failure<T>(
+    error: &train_launcher_auth::AuthError,
+    delete: impl FnOnce() -> Result<(), train_launcher_auth::AuthError>,
+) -> Result<T, String> {
+    if matches!(error, train_launcher_auth::AuthError::InvalidMicrosoftCredential) {
+        delete().map_err(|err| format!("失効したMicrosoft資格情報を削除できませんでした: {err}"))?;
+        Err("Microsoftアカウントの認証が失効しました。再度サインインしてください".into())
+    } else {
+        Err("Microsoft / Xbox / Minecraftの認証を更新できないため、通常起動を中止しました。通信・サービス状態を確認してください。保存済み本人情報は維持しています。事前登録済みで管理者が許可中の場合は、サーバー詳細の「障害時接続で起動」を明示的に選べます".into())
+    }
+}
+
+#[cfg(test)]
+mod microsoft_refresh_failure_tests {
+    use super::*;
+    use train_launcher_auth::AuthError;
+
+    #[test]
+    fn transient_normal_failure_preserves_explicit_fallback_capability() {
+        let uuid = uuid::Uuid::new_v4().to_string();
+        let (mut credential, _) = auth_fallback::generate(uuid.clone(), "Player".into()).unwrap();
+        credential.credential_id = uuid::Uuid::new_v4().to_string();
+        credential.expires_at = auth_fallback::now_ms().unwrap() + 60_000;
+        for error in [
+            AuthError::Oauth("network/service failure".into()),
+            AuthError::Minecraft("503".into()),
+            AuthError::LoopbackIo(std::io::Error::from(std::io::ErrorKind::TimedOut)),
+        ] {
+            let mut cached = Some(TokenRecord {
+                access_token: "old-token".into(), refresh_token: Some("refresh".into()),
+                expires_at: Some(0), uuid: Some(uuid.clone()),
+                display_name: Some("Player".into()), user_id: None,
+            });
+            let normal_result: Result<(), String> = microsoft_refresh_failure(&error, || {
+                cached.take();
+                Ok(())
+            });
+            assert!(normal_result.is_err());
+            auth_fallback::check_credential(&credential, cached.as_ref().unwrap(), auth_fallback::now_ms().unwrap()).unwrap();
+        }
+    }
+
+    #[test]
+    fn definitive_revocation_deletes_and_cleanup_failures_are_reported() {
+        let mut deleted = false;
+        let result: Result<(), String> = microsoft_refresh_failure(&AuthError::InvalidMicrosoftCredential, || {
+            deleted = true;
+            Ok(())
+        });
+        assert!(deleted);
+        assert!(result.is_err());
+        let result: Result<(), String> = microsoft_refresh_failure(&AuthError::InvalidMicrosoftCredential, || {
+            Err(AuthError::Keyring(keyring::Error::NoEntry))
+        });
+        assert!(result.unwrap_err().contains("削除できません"));
+    }
 }
 
 /// プロファイルを指定してMinecraftをダウンロード(未取得分のみ)した上で起動する

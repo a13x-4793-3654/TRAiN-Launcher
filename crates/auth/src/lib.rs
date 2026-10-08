@@ -20,6 +20,8 @@ mod error {
     /// train-launcher-auth 全体で使用するエラー型。
     #[derive(Debug, thiserror::Error)]
     pub enum AuthError {
+        #[error("Microsoftのリフレッシュ資格情報が失効しました。再度サインインしてください")]
+        InvalidMicrosoftCredential,
         #[error("not implemented yet: {0}")]
         NotImplemented(&'static str),
         #[error("http error: {0}")]

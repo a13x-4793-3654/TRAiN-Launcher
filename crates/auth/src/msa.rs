@@ -13,7 +13,7 @@
 //! 処理やナビゲーション監視は呼び出し側(Tauri command層)が担当する。このモジュールが提供する
 //! のは (1) 表示すべき認可URLの構築 と (2) 横取りしたcode/stateをトークンへ交換する処理のみ。
 
-use oauth2::basic::BasicClient;
+use oauth2::basic::{BasicClient, BasicErrorResponseType};
 use oauth2::{
     AuthUrl, AuthorizationCode, ClientId, CsrfToken, PkceCodeChallenge, PkceCodeVerifier,
     RedirectUrl, RefreshToken, Scope, TokenResponse, TokenUrl,
@@ -139,16 +139,32 @@ pub async fn refresh_access_token(
     config: &crate::config::MicrosoftConfig,
     refresh_token: &str,
 ) -> Result<MsaToken, AuthError> {
+    refresh_access_token_at(config, refresh_token, MSA_TOKEN_URL).await
+}
+
+async fn refresh_access_token_at(
+    config: &crate::config::MicrosoftConfig,
+    refresh_token: &str,
+    token_url: &str,
+) -> Result<MsaToken, AuthError> {
     let client = BasicClient::new(ClientId::new(config.client_id.clone()))
         .set_auth_uri(AuthUrl::new(MSA_AUTH_URL.to_string()).expect("static URL is valid"))
-        .set_token_uri(TokenUrl::new(MSA_TOKEN_URL.to_string()).expect("static URL is valid"));
+        .set_token_uri(TokenUrl::new(token_url.to_string()).expect("token URL is valid"));
     let http_client = oauth2::reqwest::Client::new();
 
     let token = client
         .exchange_refresh_token(&RefreshToken::new(refresh_token.to_string()))
         .request_async(&http_client)
         .await
-        .map_err(|err| AuthError::Oauth(err.to_string()))?;
+        .map_err(|err| match err {
+            oauth2::RequestTokenError::ServerResponse(response)
+                if *response.error() == BasicErrorResponseType::InvalidGrant =>
+            {
+                AuthError::InvalidMicrosoftCredential
+            }
+
+            _ => AuthError::Oauth("Microsoft認証サービスへ接続できないか、認証要求が拒否されました".into()),
+        })?;
 
     let expires_at = token.expires_in().map(|duration| {
         let now = std::time::SystemTime::now()
@@ -165,4 +181,53 @@ pub async fn refresh_access_token(
             .or_else(|| Some(refresh_token.to_string())),
         expires_at,
     })
+}
+
+#[cfg(test)]
+mod refresh_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn only_typed_invalid_grant_marks_the_credential_as_revoked() {
+        for (status, body, revoked) in [
+            (400, r#"{"error":"invalid_grant","error_description":"revoked refresh token"}"#, true),
+            (503, r#"{"error":"temporarily_unavailable"}"#, false),
+            (400, r#"{"error":"invalid_client"}"#, false),
+            (502, "upstream unavailable", false),
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}/token", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut bytes = Vec::new();
+                loop {
+                    let mut buffer = [0; 1024];
+                    let count = stream.read(&mut buffer).await.unwrap();
+                    assert!(count > 0);
+                    bytes.extend_from_slice(&buffer[..count]);
+                    if let Some(end) = bytes.windows(4).position(|v| v == b"\r\n\r\n") {
+                        let headers = String::from_utf8_lossy(&bytes[..end]).to_lowercase();
+                        let len = headers.lines().find_map(|line| line.strip_prefix("content-length: "))
+                            .map(|value| value.parse::<usize>().unwrap()).unwrap_or(0);
+                        if bytes.len() >= end + 4 + len { break; }
+                    }
+                }
+                stream.write_all(format!(
+                    "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                ).as_bytes()).await.unwrap();
+            });
+            let config = crate::config::MicrosoftConfig { client_id: "test-client".into() };
+            let error = refresh_access_token_at(&config, "test-refresh", &url).await.unwrap_err();
+            assert_eq!(matches!(error, AuthError::InvalidMicrosoftCredential), revoked);
+            server.await.unwrap();
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/token", listener.local_addr().unwrap());
+        drop(listener);
+        let config = crate::config::MicrosoftConfig { client_id: "test-client".into() };
+        assert!(!matches!(refresh_access_token_at(&config, "test-refresh", &url).await.unwrap_err(),
+            AuthError::InvalidMicrosoftCredential));
+    }
 }

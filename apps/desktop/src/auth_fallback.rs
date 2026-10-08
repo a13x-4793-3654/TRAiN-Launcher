@@ -11,7 +11,7 @@ use ed25519_dalek::{
 };
 use serde::{Deserialize, Serialize};
 use train_launcher_auth::store::TokenRecord;
-use train_launcher_server_api::fallback::{FallbackStatus, FallbackTicket, PROTOCOL};
+use train_launcher_server_api::fallback::{CredentialReceipt, FallbackStatus, FallbackTicket, PROTOCOL};
 use uuid::Uuid;
 
 #[derive(Default)]
@@ -61,6 +61,20 @@ pub fn now_ms() -> Result<u64, String> {
         .duration_since(UNIX_EPOCH)
         .map_err(|_| "システム時刻を確認してください".to_string())?
         .as_millis() as u64)
+}
+
+pub fn credential_expiry(receipt: &CredentialReceipt, now: u64) -> Result<u64, String> {
+    const TTL_MS: u64 = 7 * 24 * 60 * 60 * 1000;
+    const CLOCK_SKEW_MS: u64 = 60_000;
+    if Uuid::parse_str(&receipt.credential_id).is_err() || receipt.expires_at <= now {
+        return Err("事前登録の応答が不正です。端末の時刻を確認し、再登録してください".into());
+    }
+    let maximum = now.saturating_add(TTL_MS);
+    if receipt.expires_at > maximum.saturating_add(CLOCK_SKEW_MS) {
+        return Err("事前登録の有効期限を確認できません。端末の時刻を同期して再登録してください".into());
+    }
+    // Tolerate small server clock skew without extending local validity beyond seven days.
+    Ok(receipt.expires_at.min(maximum))
 }
 
 pub fn identity(token: &TokenRecord) -> Result<(String, String), String> {
@@ -432,6 +446,31 @@ fn secure_directory(_path: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn enrollment_accepts_small_clock_skew_without_extending_validity() {
+        let now = 1_800_000_000_000;
+        let maximum = now + 7 * 24 * 60 * 60 * 1000;
+        let mut receipt = CredentialReceipt {
+            credential_id: Uuid::new_v4().to_string().to_uppercase(),
+            expires_at: maximum,
+        };
+        for offset in [0, 1, 2_000, 60_000] {
+            receipt.expires_at = maximum + offset;
+            assert_eq!(credential_expiry(&receipt, now).unwrap(), maximum);
+        }
+        receipt.expires_at = maximum - 1_000;
+        assert_eq!(credential_expiry(&receipt, now).unwrap(), maximum - 1_000);
+        receipt.expires_at = maximum + 60_001;
+        assert!(credential_expiry(&receipt, now).is_err());
+        receipt.expires_at = now;
+        assert!(credential_expiry(&receipt, now).is_err());
+        receipt.expires_at = now - 1;
+        assert!(credential_expiry(&receipt, now).is_err());
+        receipt.expires_at = maximum;
+        receipt.credential_id = "invalid".into();
+        assert!(credential_expiry(&receipt, now).is_err());
+    }
 
     fn context() -> LaunchContext {
         let (mut credential, _) = generate(Uuid::new_v4().to_string(), "Player_1".into()).unwrap();

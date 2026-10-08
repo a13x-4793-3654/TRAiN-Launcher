@@ -1515,13 +1515,9 @@ async fn enroll_auth_fallback(app_handle: AppHandle, server_id: String, consent:
         public_key, minecraft_access_token: token.access_token,
     }).await.map_err(|err| err.to_string())?;
     let now = auth_fallback::now_ms()?;
-    if uuid::Uuid::parse_str(&receipt.credential_id).is_err() || receipt.expires_at <= now
-        || receipt.expires_at > now.saturating_add(7 * 24 * 60 * 60 * 1000)
-    {
-        return Err("事前登録の応答が不正です。復旧後に再登録してください".into());
-    }
+    let expires_at = auth_fallback::credential_expiry(&receipt, now)?;
     credential.credential_id = receipt.credential_id;
-    credential.expires_at = receipt.expires_at;
+    credential.expires_at = expires_at;
     auth_fallback::save(&server_id, &discord_id, &credential)?;
     Ok(credential.expires_at)
 }

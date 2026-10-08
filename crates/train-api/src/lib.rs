@@ -47,7 +47,9 @@ pub enum TrainApiError {
     FallbackUnavailable,
     #[error("Minecraft認証サービスに接続できません。事前登録は復旧後に行ってください")]
     MinecraftUnavailable,
-    #[error("Minecraftアカウントの紐づけ・本人確認または参加資格を確認してください")]
+    #[error(
+        "Minecraftアカウントの紐づけ・本人確認または参加資格を確認できませんでした。資格情報の期限切れも考えられます。期限切れの場合はMinecraft認証の復旧後に再登録してください"
+    )]
     FallbackDenied,
     #[error("not implemented yet: {0}")]
     NotImplemented(&'static str),

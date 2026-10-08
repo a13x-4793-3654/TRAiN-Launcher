@@ -167,11 +167,10 @@ pub fn check_status(
 pub fn check_credential(
     credential: &Credential,
     token: &TokenRecord,
-    now: u64,
 ) -> Result<(), String> {
     let (uuid, name) = identity(token)?;
-    if credential.expires_at <= now || Uuid::parse_str(&credential.credential_id).is_err() {
-        return Err("事前登録がないか7日間の有効期限が切れています。Minecraft認証の復旧後に登録してください".into());
+    if Uuid::parse_str(&credential.credential_id).is_err() {
+        return Err("事前登録がありません。Minecraft認証の復旧後に登録してください".into());
     }
     if credential.mc_uuid != uuid || credential.mc_name != name {
         return Err(
@@ -651,7 +650,7 @@ mod tests {
     }
 
     #[test]
-    fn credential_requires_cached_verified_identity_unexpired_record_and_valid_key() {
+    fn credential_requires_cached_verified_identity_valid_id_and_key() {
         let mut context = context();
         let now = now_ms().unwrap();
         let mut token = TokenRecord {
@@ -660,18 +659,23 @@ mod tests {
             display_name: Some(context.credential.mc_name.clone()),
             uuid: Some(context.credential.mc_uuid.replace('-', "")), user_id: None,
         };
-        assert!(check_credential(&context.credential, &token, now).is_ok());
+        assert!(check_credential(&context.credential, &token).is_ok());
         token.uuid = None;
-        assert!(check_credential(&context.credential, &token, now).is_err());
+        assert!(check_credential(&context.credential, &token).is_err());
         token.uuid = Some(context.credential.mc_uuid.clone());
         token.display_name = Some("SomeoneElse".into());
-        assert!(check_credential(&context.credential, &token, now).is_err());
+        assert!(check_credential(&context.credential, &token).is_err());
         token.display_name = Some(context.credential.mc_name.clone());
-        context.credential.expires_at = now;
-        assert!(check_credential(&context.credential, &token, now).is_err());
+        for expires_at in [0, now - 1, now] {
+            context.credential.expires_at = expires_at;
+            assert!(check_credential(&context.credential, &token).is_ok());
+        }
         context.credential.expires_at = now + 1000;
+        context.credential.credential_id = "invalid".into();
+        assert!(check_credential(&context.credential, &token).is_err());
+        context.credential.credential_id = Uuid::new_v4().to_string();
         context.credential.private_key = "invalid".into();
-        assert!(check_credential(&context.credential, &token, now).is_err());
+        assert!(check_credential(&context.credential, &token).is_err());
     }
 
     #[test]

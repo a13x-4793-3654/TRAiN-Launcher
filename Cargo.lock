@@ -5191,7 +5191,7 @@ dependencies = [
 
 [[package]]
 name = "train-launcher-auth"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "keyring",
  "minecraft-msa-auth",
@@ -5205,7 +5205,7 @@ dependencies = [
 
 [[package]]
 name = "train-launcher-core"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "chrono",
  "dirs 5.0.1",
@@ -5224,7 +5224,7 @@ dependencies = [
 
 [[package]]
 name = "train-launcher-desktop"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "base64 0.22.1",
  "ed25519-dalek",
@@ -5251,7 +5251,7 @@ dependencies = [
 
 [[package]]
 name = "train-launcher-mods"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "ferinth",
  "furse",
@@ -5266,7 +5266,7 @@ dependencies = [
 
 [[package]]
 name = "train-launcher-server-api"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "async-trait",
  "reqwest 0.12.28",

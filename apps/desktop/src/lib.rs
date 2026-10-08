@@ -1005,7 +1005,7 @@ mod microsoft_refresh_failure_tests {
                 Ok(())
             });
             assert!(normal_result.is_err());
-            auth_fallback::check_credential(&credential, cached.as_ref().unwrap(), auth_fallback::now_ms().unwrap()).unwrap();
+            auth_fallback::check_credential(&credential, cached.as_ref().unwrap()).unwrap();
         }
     }
 
@@ -1066,7 +1066,7 @@ async fn launch_profile_with_fallback(
     let token = if let Some(context) = &fallback {
         let token = store::load_token(Provider::Microsoft).map_err(|err| err.to_string())?
             .ok_or("確認済みのMinecraftアカウントがありません。復旧後にサインインしてください")?;
-        auth_fallback::check_credential(&context.credential, &token, auth_fallback::now_ms()?)?;
+        auth_fallback::check_credential(&context.credential, &token)?;
         token
     } else {
         ensure_valid_microsoft_token().await?
@@ -1218,9 +1218,6 @@ async fn launch_profile_with_fallback(
         let client = train_launcher_server_api::create_client(Some(discord.access_token));
         let status = client.fallback_status(&context.server_id).await.map_err(|err| err.to_string())?;
         auth_fallback::check_status(&status, auth_fallback::now_ms()?, true)?;
-        if context.credential.expires_at <= auth_fallback::now_ms()? {
-            return Err("準備中に事前登録の期限が切れました。復旧後に再登録してください".into());
-        }
         let ticket = client.fallback_ticket(&context.server_id, &context.credential.credential_id)
             .await.map_err(|err| err.to_string())?;
         Some(auth_fallback::PrivateTicket::create(&ticket, context, app_handle.state::<auth_fallback::TicketRegistry>().inner().clone())?)
@@ -1533,7 +1530,7 @@ async fn join_train_server_fallback(app_handle: AppHandle, server_id: String, se
         .ok_or("事前登録がありません。Minecraft認証サービスの復旧後に登録してください")?;
     let token = store::load_token(Provider::Microsoft).map_err(|err| err.to_string())?
         .ok_or("確認済みのMinecraftアカウントがありません。復旧後にサインインしてください")?;
-    auth_fallback::check_credential(&credential, &token, auth_fallback::now_ms()?)?;
+    auth_fallback::check_credential(&credential, &token)?;
     let client = train_launcher_server_api::create_client(Some(discord.access_token));
     let status = client.fallback_status(&server_id).await.map_err(|err| err.to_string())?;
     auth_fallback::check_status(&status, auth_fallback::now_ms()?, true)?;

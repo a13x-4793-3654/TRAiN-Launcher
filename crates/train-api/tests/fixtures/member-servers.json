@@ -1,0 +1,6 @@
+[
+  {"id":"production","name":"Production"},
+  {"id":"workspace-amber","name":"Workspace Amber","environment":"workspace","parent_server_id":"production","expires_at":"2026-10-12T00:00:00Z","style":{"badge":"検証","palette":{"background":"#352613","foreground":"#ffe3ad","border":"#de9b3b"}}},
+  {"id":"workspace-blue","name":"Workspace Blue","environment":"workspace","parent_server_id":"production","expires_at":"2026-10-12T00:00:00Z","style":{"badge":"検証","palette":{"background":"#162b43","foreground":"#cce8ff","border":"#5fa8ef"}}},
+  {"id":"workspace-purple","name":"Workspace Purple","environment":"workspace","parent_server_id":"production","expires_at":"2026-10-12T00:00:00Z","style":{"badge":"検証","palette":{"background":"#30203f","foreground":"#f1d9ff","border":"#b580da"}}}
+]

@@ -161,4 +161,22 @@ mod tests {
             Err(TrainApiError::FallbackUnavailable)
         ));
     }
+
+    #[tokio::test]
+    async fn workspace_config_uses_own_id_and_unconfigured_never_falls_back() {
+        let (client, request) = server(
+            200,
+            r#"{"server_id":"workspace","address":"workspace.example.com:25565","minecraft_version":"1.21.1","mod_loader":"fabric","fabric_loader_version":"0.19.5","mod_urls":["https://example.com/workspace.jar"],"resource_pack_urls":[]}"#,
+        ).await;
+        let config = client.get_server_config("workspace").await.unwrap();
+        assert_eq!(config.server_id, "workspace");
+        assert_eq!(config.fabric_loader_version.as_deref(), Some("0.19.5"));
+        assert!(request.await.unwrap().starts_with("GET /api/servers/workspace/config "));
+
+        let (client, request) = server(404, r#"{"error":"not_configured"}"#).await;
+        let error = client.get_server_config("workspace").await.unwrap_err();
+        assert!(matches!(error, TrainApiError::NotConfigured));
+        assert!(error.to_string().contains("反映待ち"));
+        assert!(request.await.unwrap().starts_with("GET /api/servers/workspace/config "));
+    }
 }

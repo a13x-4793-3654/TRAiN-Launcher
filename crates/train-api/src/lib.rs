@@ -70,7 +70,7 @@ pub enum TrainApiError {
     /// `404 not_configured`: サーバーは登録されているが、`minecraft-mods manifest`
     /// (または`apply`)がTRAiN Link経由で一度も送られておらず、接続先/Mod構成が無い。
     #[error(
-        "このサーバーはまだ配布設定(接続先・Mod構成)が登録されていません。サーバー管理者に確認してください"
+        "このサーバーの配布設定(接続先・Mod構成)は未登録または反映待ちです。Workspaceの操作・設定反映が完了してから再試行してください。サーバー管理者に確認してください"
     )]
     NotConfigured,
     /// `405 method_not_allowed`: 想定外のHTTPメソッド(通常は発生しない)。
@@ -229,6 +229,10 @@ impl TrainApiClient for MockTrainApiClient {
         Ok(vec![MemberServer {
             id: "mock-server-1".to_string(),
             name: "TRAiN Mock Server".to_string(),
+            environment: None,
+            parent_server_id: None,
+            expires_at: None,
+            style: None,
         }])
     }
 
@@ -238,6 +242,7 @@ impl TrainApiClient for MockTrainApiClient {
             address: "play.example.com:25565".to_string(),
             minecraft_version: "1.21".to_string(),
             mod_loader: Some("fabric".to_string()),
+            fabric_loader_version: None,
             mod_urls: vec![],
             resource_pack_urls: vec![],
             // モック環境では実サーバーが存在しないため紐づけ状態を判定できない。
@@ -497,6 +502,42 @@ pub fn create_client(discord_access_token: Option<String>) -> Box<dyn TrainApiCl
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn member_server_http_response_preserves_workspace_metadata_for_ipc() {
+        use super::{HttpTrainApiClient, TrainApiClient};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let body = include_str!("../tests/fixtures/member-servers.json");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = HttpTrainApiClient::new(
+            format!("http://{}", listener.local_addr().unwrap()),
+            Some("discord-proof".into()),
+        );
+        let task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            while !request.windows(4).any(|v| v == b"\r\n\r\n") {
+                let mut buffer = [0; 1024];
+                let count = stream.read(&mut buffer).await.unwrap();
+                assert!(count > 0);
+                request.extend_from_slice(&buffer[..count]);
+            }
+            let request = String::from_utf8(request).unwrap();
+            assert!(request.starts_with("GET /api/members/member/servers "));
+            assert!(request.to_lowercase().contains("authorization: bearer discord-proof"));
+            stream.write_all(format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            ).as_bytes()).await.unwrap();
+        });
+        let servers = client.get_member_servers("member").await.unwrap();
+        task.await.unwrap();
+        assert_eq!(
+            serde_json::to_value(servers).unwrap(),
+            serde_json::from_str::<serde_json::Value>(body).unwrap()
+        );
+    }
+
     /// ビルド時環境変数 `TRAIN_LAUNCHER_DEFAULT_API_BASE_URL` が [`option_env!`] 経由で
     /// [`super::DEFAULT_API_BASE_URL`] へ正しく埋め込まれることを確認する回帰テスト。
     /// 未設定でビルドした場合は空文字列になる(ローカル開発時の既定=モック実装)ことも検証する。

@@ -9,6 +9,7 @@ import {
   Text,
   Card,
   CardHeader,
+  Badge,
   Toaster,
   useToastController,
   Toast,
@@ -24,6 +25,7 @@ import { ServerDetailPage } from "./ServerDetail";
 import { AccountLinkNoticeModal } from "./AccountLinkNoticeModal";
 import { TestModeNoticeModal } from "./TestModeNoticeModal";
 import { useLaunchStatus } from "../LaunchStatus";
+import { type MemberServer, useWorkspaceStyles, workspaceBadge, workspaceSurfaceStyle } from "../memberServer";
 
 const TOASTER_ID = "servers-toaster";
 const GAME_EXITED_EVENT = "game://exited";
@@ -32,11 +34,6 @@ const LAUNCH_PROGRESS_EVENT = "launch://progress";
 interface AuthStatus {
   discord_display_name: string | null;
   microsoft_display_name: string | null;
-}
-
-interface MemberServer {
-  id: string;
-  name: string;
 }
 
 interface ServerConfig {
@@ -107,6 +104,7 @@ const useStyles = makeStyles({
  */
 export function ServersPage() {
   const styles = useStyles();
+  const workspaceStyles = useWorkspaceStyles();
   const { dispatchToast } = useToastController(TOASTER_ID);
   const { beginLaunch, endLaunch } = useLaunchStatus();
 
@@ -366,10 +364,27 @@ export function ServersPage() {
           ) : (
             <div className={styles.list}>
               {servers.map((server) => (
-                <Card key={server.id}>
+                <Card
+                  key={server.id}
+                  className={server.environment === "workspace" ? workspaceStyles.surface : undefined}
+                  style={workspaceSurfaceStyle(server)}
+                >
                   <CardHeader
-                    header={<Text weight="semibold">{server.name}</Text>}
-                    description={<Caption1>{server.id}</Caption1>}
+                    header={
+                      <Text weight="semibold">
+                        {server.name}{" "}
+                        {server.environment === "workspace" && (
+                          <Badge appearance="outline" style={{ color: "inherit", borderColor: "currentColor", whiteSpace: "nowrap" }}>
+                            {workspaceBadge(server)}
+                          </Badge>
+                        )}
+                      </Text>
+                    }
+                    description={
+                      <Caption1 style={server.environment === "workspace" ? { color: "inherit" } : undefined}>
+                        {server.id}
+                      </Caption1>
+                    }
                     action={
                       <div className={styles.cardActions}>
                         <Button

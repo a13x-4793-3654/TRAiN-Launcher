@@ -31,17 +31,14 @@ import {
 } from "@fluentui/react-icons";
 import { invoke } from "@tauri-apps/api/core";
 import { AuthFallbackPanel } from "./AuthFallbackPanel";
-
-interface MemberServer {
-  id: string;
-  name: string;
-}
+import { type MemberServer, useWorkspaceStyles, workspaceBadge, workspaceSurfaceStyle } from "../memberServer";
 
 interface ServerConfig {
   server_id: string;
   address: string;
   minecraft_version: string;
   mod_loader: string | null;
+  fabric_loader_version?: string | null;
   mod_urls: string[];
   resource_pack_urls: string[];
   linked: boolean | null;
@@ -156,6 +153,7 @@ export function ServerDetailPage(props: {
   progress: LaunchProgressPayload | null;
 }) {
   const styles = useStyles();
+  const workspaceStyles = useWorkspaceStyles();
 
   const [config, setConfig] = useState<ServerConfig | null>(null);
   const [loading, setLoading] = useState(true);
@@ -171,6 +169,7 @@ export function ServerDetailPage(props: {
   >(null);
 
   const loadConfig = useCallback(() => {
+    setConfig(null);
     setLoading(true);
     setError(null);
     invoke<ServerConfig>("get_server_config", { serverId: props.server.id })
@@ -223,12 +222,28 @@ export function ServerDetailPage(props: {
         </Button>
       </div>
 
-      <Title2 as="h2" block>
-        {props.server.name}
-      </Title2>
-      <Caption1 as="p" block>
-        {props.server.id}
-      </Caption1>
+      {props.server.environment === "workspace" ? (
+        <Card className={workspaceStyles.surface} style={workspaceSurfaceStyle(props.server)}>
+          <Title2 as="h2" block>
+            {props.server.name}{" "}
+            <Badge appearance="outline" style={{ color: "inherit", borderColor: "currentColor", whiteSpace: "nowrap" }}>
+              {workspaceBadge(props.server)}
+            </Badge>
+          </Title2>
+          <Caption1 as="p" block style={{ color: "inherit" }}>
+            {props.server.id}
+          </Caption1>
+        </Card>
+      ) : (
+        <>
+          <Title2 as="h2" block>
+            {props.server.name}
+          </Title2>
+          <Caption1 as="p" block>
+            {props.server.id}
+          </Caption1>
+        </>
+      )}
 
       <div className={styles.commandBar}>
         <Button
@@ -348,7 +363,12 @@ export function ServerDetailPage(props: {
               <Text>{config.minecraft_version}</Text>
             </Field>
             <Field label="Modローダー">
-              <Text>{config.mod_loader ?? "なし(バニラ)"}</Text>
+              <Text>
+                {config.mod_loader ?? "なし(バニラ)"}
+                {config.mod_loader === "fabric" && config.fabric_loader_version
+                  ? ` ${config.fabric_loader_version}`
+                  : ""}
+              </Text>
             </Field>
             <Field label="Discordアカウントとの連携">
               <Text>

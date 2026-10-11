@@ -1119,7 +1119,9 @@ async fn launch_profile_with_fallback(
     // 自動導入し、以降のダウンロード/起動には導入後のバージョンID(例:
     // `fabric-loader-0.19.5-1.20.4`)を使う。未導入の場合のみ実際のインストールが走る。
     let resolved_version = if fallback.is_some() {
-        let game_version = auth_fallback::cached_fabric_id(&launcher_root)?;
+        let game_version = auth_fallback::cached_fabric_id(
+            &launcher_root, profile.mod_loader_version.as_deref(),
+        )?;
         train_launcher_core::version_manifest::resolve_cached_version(&game_version, &paths).await
             .map_err(|err| format!("Fabricの事前準備を確認してください: {err}"))?
     } else if let Some(loader_name) = profile.mod_loader.clone() {
@@ -1547,6 +1549,65 @@ async fn join_train_server_fallback(app_handle: AppHandle, server_id: String, se
     Ok(warnings)
 }
 
+fn configured_loader_version(
+    config: &train_launcher_server_api::ServerConfig,
+) -> Result<Option<String>, String> {
+    if config.mod_loader.as_deref() != Some("fabric") {
+        return Ok(None);
+    }
+    let Some(version) = config.fabric_loader_version.as_deref() else {
+        return Ok(None);
+    };
+    if version.is_empty() || version.len() > 64
+        || !version.starts_with(|c: char| c.is_ascii_digit())
+        || !version.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+    {
+        return Err("配布設定のFabric Loaderバージョンが不正です。管理者に確認してください".into());
+    }
+    Ok(Some(version.to_string()))
+}
+
+#[cfg(test)]
+mod configured_loader_tests {
+    use super::configured_loader_version;
+    use train_launcher_server_api::ServerConfig;
+
+    fn config(version: Option<&str>, loader: &str) -> ServerConfig {
+        serde_json::from_value(serde_json::json!({
+            "server_id": "workspace", "address": "workspace.example.com:25565",
+            "minecraft_version": "1.21.1", "mod_loader": loader,
+            "fabric_loader_version": version, "mod_urls": [], "resource_pack_urls": []
+        })).unwrap()
+    }
+
+    #[test]
+    fn api_pin_survives_serialization_and_legacy_configs_keep_default_selection() {
+        let config = config(Some("0.19.5"), "fabric");
+        let restored: ServerConfig = serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
+        assert_eq!(configured_loader_version(&restored).unwrap().as_deref(), Some("0.19.5"));
+        let mut profile: train_launcher_core::profile::Profile =
+            serde_json::from_value(serde_json::json!({
+                "id": "train-workspace", "name": "Workspace",
+                "minecraft_version": restored.minecraft_version,
+                "mod_loader": restored.mod_loader, "server_id": restored.server_id,
+            })).unwrap();
+        profile.mod_loader_version = configured_loader_version(&config).unwrap();
+        let saved: train_launcher_core::profile::Profile =
+            serde_json::from_str(&serde_json::to_string(&profile).unwrap()).unwrap();
+        assert_eq!(saved.mod_loader_version.as_deref(), Some("0.19.5"));
+        assert_eq!(saved.server_id.as_deref(), Some("workspace"));
+        assert_eq!(configured_loader_version(&self::config(None, "fabric")).unwrap(), None);
+        assert_eq!(configured_loader_version(&self::config(Some("0.19.5"), "forge")).unwrap(), None);
+    }
+
+    #[test]
+    fn invalid_api_pin_stops_launch_instead_of_selecting_latest() {
+        for version in ["", "../0.19.5", "0.19.5/extra", "0.19.5?extra", " 0.19.5", "0.19.5\n"] {
+            assert!(configured_loader_version(&config(Some(version), "fabric")).is_err());
+        }
+    }
+}
+
 /// TRAiN APIから最新のサーバー設定を取得し、サーバー専用プロファイルとMod・リソース
 /// パック・servers.dat・options.txtを同期する(起動はしない)。
 ///
@@ -1609,9 +1670,7 @@ async fn sync_train_server_profile(
         name: server_name,
         minecraft_version: server_config.minecraft_version.clone(),
         mod_loader: server_config.mod_loader.clone(),
-        // TRAiNサーバー設定には現状ローダーの具体バージョンを指定する項目が無いため、
-        // 常に最新の安定版を自動選択する。
-        mod_loader_version: None,
+        mod_loader_version: configured_loader_version(&server_config)?,
         server_id: Some(server_id),
         game_dir: previous_profile
             .as_ref()

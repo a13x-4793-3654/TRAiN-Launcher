@@ -496,6 +496,33 @@ mod tests {
     // `cargo test -p train-launcher-core mod_loader:: -- --ignored --nocapture` を実行する。
 
     #[tokio::test]
+    async fn explicit_fabric_version_is_not_replaced_by_default_selection() {
+        assert_eq!(
+            resolve_loader_version(ModLoaderKind::Fabric, "1.21.1", Some("0.19.5"))
+                .await.unwrap(),
+            "0.19.5"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires network access to meta.fabricmc.net"]
+    async fn explicit_fabric_version_installs_requested_profile() {
+        let destination = tempfile::tempdir().unwrap();
+        let id = ensure_mod_loader_installed(
+            ModLoaderKind::Fabric, "1.21.1", Some("0.19.5"), destination.path(), "",
+        ).await.unwrap();
+        assert_eq!(id, "fabric-loader-0.19.5-1.21.1");
+        let profile: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(LauncherPaths::new(destination.path()).version_json_path(&id)).unwrap(),
+        ).unwrap();
+        assert_eq!(profile["id"], id);
+        assert_eq!(profile["inheritsFrom"], "1.21.1");
+        assert!(profile["libraries"].as_array().unwrap().iter().any(|library|
+            library["name"] == "net.fabricmc:fabric-loader:0.19.5"
+        ));
+    }
+
+    #[tokio::test]
     #[ignore = "requires network access to meta.fabricmc.net"]
     async fn list_loader_versions_fabric_returns_real_data() {
         let versions = list_loader_versions(ModLoaderKind::Fabric, "1.20.4")

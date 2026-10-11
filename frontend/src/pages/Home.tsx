@@ -24,6 +24,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { NavKey } from "../App";
 import { useLaunchStatus } from "../LaunchStatus";
+import type { MemberServer } from "../memberServer";
 
 const TOASTER_ID = "home-toaster";
 const GAME_EXITED_EVENT = "game://exited";
@@ -55,11 +56,6 @@ interface Announcement {
 // 由来(グローバル/サーバー名)を1件ずつ保持する。
 interface AnnouncementItem extends Announcement {
   source: string;
-}
-
-interface MemberServer {
-  id: string;
-  name: string;
 }
 
 interface GameExitedPayload {

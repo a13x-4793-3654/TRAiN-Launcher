@@ -238,7 +238,7 @@ pub fn check_companion(game_dir: &Path, managed: &[String]) -> Result<(), String
     Err("配布設定にtrain-auth-fallback 1.0.0がありません。管理者から対応Modを配布してもらってください".into())
 }
 
-pub fn cached_fabric_id(root: &Path) -> Result<String, String> {
+pub fn cached_fabric_id(root: &Path, requested: Option<&str>) -> Result<String, String> {
     let versions = std::fs::read_dir(root.join("versions"))
         .map_err(|_| "ゲームの準備がありません。復旧後に通常起動してください")?;
     let mut candidates = Vec::new();
@@ -251,6 +251,9 @@ pub fn cached_fabric_id(root: &Path) -> Result<String, String> {
         else {
             continue;
         };
+        if requested.is_some_and(|requested| requested != version) {
+            continue;
+        }
         let parts: Vec<u32> = match version.split('.').map(str::parse).collect::<Result<_, _>>() {
             Ok(parts) => parts,
             Err(_) => continue,
@@ -264,7 +267,10 @@ pub fn cached_fabric_id(root: &Path) -> Result<String, String> {
     }
     candidates.sort();
     candidates.pop().map(|(_, name)| name).ok_or_else(|| {
-        "Fabric Loader 0.19.5以上の準備がありません。復旧後に通常起動してください".into()
+        match requested {
+            Some(version) => format!("指定されたFabric Loader {version}（0.19.5以上）の準備がありません。復旧後に通常起動してください"),
+            None => "Fabric Loader 0.19.5以上の準備がありません。復旧後に通常起動してください".into(),
+        }
     })
 }
 
@@ -644,9 +650,15 @@ mod tests {
             std::fs::write(folder.join(format!("{id}.json")), "{}").unwrap();
         }
         assert_eq!(
-            cached_fabric_id(root.path()).unwrap(),
+            cached_fabric_id(root.path(), None).unwrap(),
             "fabric-loader-0.20.0-1.21.1"
         );
+        assert_eq!(
+            cached_fabric_id(root.path(), Some("0.19.5")).unwrap(),
+            "fabric-loader-0.19.5-1.21.1"
+        );
+        assert!(cached_fabric_id(root.path(), Some("0.19.6")).is_err());
+        assert!(cached_fabric_id(root.path(), Some("0.19.4")).is_err());
     }
 
     #[test]

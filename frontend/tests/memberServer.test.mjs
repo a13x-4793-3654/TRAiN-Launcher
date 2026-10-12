@@ -23,6 +23,7 @@ function loadSource(relativePath, overrides = {}, warnings = []) {
   runInNewContext(code, {
     exports,
     console: { ...console, warn: (...args) => warnings.push(args) },
+    window: { setInterval: () => 0, clearInterval: () => {} },
     require: (name) => {
       if (name in overrides) return overrides[name];
       if (name.startsWith(".")) {
@@ -88,12 +89,12 @@ test("badges use safe React text and reject malformed or oversized labels", () =
   assert.equal(workspaceBadge({ ...servers[1], style: { badge: "検証 blue" } }), "検証 blue");
 });
 
-function renderPage(page, serverList = servers, stateChanges = [], callbacks = []) {
+function renderPage(page, serverList = servers, stateChanges = [], callbacks = [], effects = [], invocations = []) {
   let stateIndex = 0;
   const overrides = {
     react: {
       ...React,
-      useEffect: () => {},
+      useEffect: (fn) => { effects.push(fn); },
       useCallback: (fn) => { callbacks.push(fn); return fn; },
       useState: (initial) => {
         const index = stateIndex++;
@@ -104,14 +105,17 @@ function renderPage(page, serverList = servers, stateChanges = [], callbacks = [
         ];
       },
     },
-    "@tauri-apps/api/core": { invoke: () => Promise.reject("not_configured") },
+    "@tauri-apps/api/core": { invoke: (command, args) => {
+      invocations.push({ command, args });
+      return Promise.reject("not_configured");
+    } },
     "@tauri-apps/api/event": { listen: () => { throw new Error("Unexpected event subscription"); } },
     "../LaunchStatus": { useLaunchStatus: () => ({ beginLaunch: () => {}, endLaunch: () => {} }) },
     "./ServerDetail": { ServerDetailPage: () => null },
     "./AccountLinkNoticeModal": { AccountLinkNoticeModal: () => null },
     "./TestModeNoticeModal": { TestModeNoticeModal: () => null },
-    "./AuthFallbackPanel": { AuthFallbackPanel: () => null },
   };
+  overrides["./AuthFallbackPanel"] = loadSource("pages/AuthFallbackPanel.tsx", overrides);
   const module = loadSource(`pages/${page}.tsx`, overrides);
   const props = page === "Servers" ? {} : {
     server: serverList[0], joining: false, progress: null,
@@ -159,4 +163,40 @@ test("detail refresh clears previously loaded config before an unconfigured resp
   assert.equal(changes[0].value, null);
   await new Promise(resolve => setImmediate(resolve));
   assert.ok(changes.some(change => change.value === "not_configured"));
+});
+
+test("Workspace detail omits fallback settings and never requests fallback status", async () => {
+  for (const server of servers.slice(1)) {
+    const effects = [];
+    const invocations = [];
+    const html = renderPage("ServerDetail", [server], [], [], effects, invocations);
+    assert.ok(!html.includes("Mojang障害時"));
+    for (const label of ["事前登録・再登録", "障害時接続で起動", "状態を更新"]) {
+      assert.ok(!html.includes(label));
+    }
+    effects.forEach(effect => effect());
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(invocations.map(call => call.command), [
+      "get_server_config", "get_server_announcements",
+    ]);
+    assert.ok(invocations.every(call => call.args.serverId === server.id));
+    assert.ok(html.includes("起動"));
+  }
+});
+
+test("production and legacy detail retain fallback settings and status requests", async () => {
+  for (const environment of [undefined, null, "production"]) {
+    const server = { ...servers[0], environment };
+    const effects = [];
+    const invocations = [];
+    const html = renderPage("ServerDetail", [server], [], [], effects, invocations);
+    for (const label of ["Mojang障害時", "事前登録・再登録", "障害時接続で起動", "状態を更新"]) {
+      assert.ok(html.includes(label));
+    }
+    const cleanups = effects.map(effect => effect());
+    await new Promise(resolve => setImmediate(resolve));
+    cleanups.forEach(cleanup => cleanup?.());
+    assert.ok(invocations.some(call =>
+      call.command === "get_auth_fallback_status" && call.args.serverId === server.id));
+  }
 });

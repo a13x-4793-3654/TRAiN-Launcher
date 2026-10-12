@@ -272,15 +272,17 @@ export function ServerDetailPage(props: {
         </Button>
       </div>
 
-      <div className={styles.section}>
-        <AuthFallbackPanel
-          key={props.server.id}
-          serverId={props.server.id}
-          busy={props.joining || resetting || loading || !config}
-          testMode={config?.test_mode === true}
-          onLaunch={props.onFallbackJoin}
-        />
-      </div>
+      {props.server.environment !== "workspace" && (
+        <div className={styles.section}>
+          <AuthFallbackPanel
+            key={props.server.id}
+            serverId={props.server.id}
+            busy={props.joining || resetting || loading || !config}
+            testMode={config?.test_mode === true}
+            onLaunch={props.onFallbackJoin}
+          />
+        </div>
+      )}
 
       {props.joining && (
         <div className={styles.progressArea}>

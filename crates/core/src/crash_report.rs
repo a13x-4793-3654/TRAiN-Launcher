@@ -208,6 +208,7 @@ pub fn redact(text: &str, home: Option<&Path>, secrets: &[&str]) -> String {
     }
 
     result = redact_flag_values(&result, &["--accessToken", "--session", "--xuid", "--clientId"]);
+    result = redact_token_fields(&result);
     result = redact_jwts(&result);
 
     if let Some(home) = home {
@@ -226,6 +227,60 @@ pub fn redact(text: &str, home: Option<&Path>, secrets: &[&str]) -> String {
     }
     result = redact_user_directories(&result);
     redact_environment_lines(&result)
+}
+
+fn redact_token_fields(text: &str) -> String {
+    let mut result = text.to_string();
+    for key in ["minecraft_access_token", "access_token", "refresh_token"] {
+        let lower = result.to_ascii_lowercase();
+        let mut output = String::with_capacity(result.len());
+        let mut position = 0;
+        while let Some(found) = lower[position..].find(key) {
+            let start = position + found;
+            let end = start + key.len();
+            output.push_str(&result[position..end]);
+            position = end;
+            if start > 0 && matches!(result.as_bytes()[start - 1], b'_' | b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9') {
+                continue;
+            }
+            let mut tail = &result[end..];
+            if tail.starts_with(['"', '\'']) {
+                tail = &tail[1..];
+            }
+            tail = tail.trim_start();
+            if !tail.starts_with([':', '=']) {
+                continue;
+            }
+            tail = tail[1..].trim_start();
+            let quote = tail.chars().next().filter(|c| matches!(c, '"' | '\''));
+            if quote.is_some() {
+                tail = &tail[1..];
+            }
+            let value_start = result.len() - tail.len();
+            let mut escaped = false;
+            let value_len = tail.char_indices().find_map(|(index, c)| {
+                if escaped {
+                    escaped = false;
+                    return None;
+                }
+                if quote.is_some() && c == '\\' {
+                    escaped = true;
+                    return None;
+                }
+                let finished = match quote {
+                    Some(quote) => c == quote,
+                    None => c.is_whitespace() || matches!(c, ',' | '}' | ']'),
+                };
+                finished.then_some(index)
+            }).unwrap_or(tail.len());
+            output.push_str(&result[end..value_start]);
+            output.push_str("<redacted>");
+            position = value_start + value_len;
+        }
+        output.push_str(&result[position..]);
+        result = output;
+    }
+    result
 }
 
 fn redact_flag_values(text: &str, flags: &[&str]) -> String {
@@ -493,6 +548,26 @@ mod tests {
         let secret = "opaque-token-value-1234567890";
         let redacted = redact(&format!("token={secret}"), None, &[secret]);
         assert_eq!(redacted, "token=<redacted>");
+    }
+
+    #[test]
+    fn redacts_opaque_ownership_proof_in_json_debug_and_key_value_logs() {
+        let secret = "synthetic-opaque-minecraft-proof";
+        for text in [
+            format!(r#"{{"minecraft_access_token":"{secret}","mc_name":"Player"}}"#),
+            format!("LinkAccountRequest {{ minecraft_access_token: \"{secret}\", mc_name: \"Player\" }}"),
+            format!("MINECRAFT_ACCESS_TOKEN={secret}"),
+            format!("access_token = '{secret}'"),
+            format!(r#"{{"refresh_token":"{secret}"}}"#),
+            r#"{"minecraft_access_token":"escaped\"opaque-proof","mc_name":"Player"}"#.into(),
+        ] {
+            let redacted = redact(&text, None, &[]);
+            assert!(!redacted.contains(secret), "{redacted}");
+            assert!(!redacted.contains("opaque-proof"), "{redacted}");
+            assert!(redacted.contains("<redacted>"), "{redacted}");
+        }
+        let ordinary = r#"{"minecraft_access_token_hint":"keep","mc_name":"Player"}"#;
+        assert_eq!(redact(ordinary, None, &[]), ordinary);
     }
 
     #[test]

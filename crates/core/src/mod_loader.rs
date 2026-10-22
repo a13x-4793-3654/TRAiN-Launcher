@@ -21,12 +21,14 @@
 //! 意識する必要はない。
 
 use std::collections::HashSet;
+use std::io::Write;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 
 use crate::paths::LauncherPaths;
+use crate::private_directory::PrivateDirectory;
 use crate::CoreError;
 
 /// 対応するModローダーの種類。
@@ -378,15 +380,9 @@ async fn ensure_installer_based_loader_installed(
         .bytes()
         .await?;
 
-    let installer_dir = std::env::temp_dir().join("train-launcher-installers");
-    tokio::fs::create_dir_all(&installer_dir).await?;
-    let installer_path = installer_dir.join(format!(
-        "{}-{}-{}-installer.jar",
-        kind.as_str(),
-        game_version,
-        loader_version
-    ));
-    tokio::fs::write(&installer_path, &installer_bytes).await?;
+    let staging = PrivateDirectory::new("train-installer-")?;
+    let installer_path = staging.path().join("installer.jar");
+    staging.create_file("installer.jar")?.write_all(&installer_bytes)?;
 
     tokio::fs::create_dir_all(paths.root()).await?;
     let versions_before = list_installed_version_ids(paths).await;
@@ -398,23 +394,7 @@ async fn ensure_installer_based_loader_installed(
         .arg(&installer_path)
         .arg(&install_arg);
     crate::process_ext::suppress_console_window(&mut installer_command);
-    let status = installer_command
-        .status()
-        .await
-        .map_err(|err| {
-            CoreError::ModLoaderInstallFailed(format!(
-                "failed to launch loader installer ({java_path}): {err}"
-            ))
-        })?;
-
-    // インストーラ本体は導入後は不要なため、ベストエフォートで削除する。
-    let _ = tokio::fs::remove_file(&installer_path).await;
-
-    if !status.success() {
-        return Err(CoreError::ModLoaderInstallFailed(format!(
-            "loader installer exited with status {status}"
-        )));
-    }
+    run_installer(installer_command, staging).await?;
 
     if paths.version_json_path(&predicted_id).exists() {
         return Ok(predicted_id);
@@ -434,9 +414,109 @@ async fn ensure_installer_based_loader_installed(
         })
 }
 
+async fn run_installer(
+    mut command: Command,
+    staging: PrivateDirectory,
+) -> Result<(), CoreError> {
+    // The worker retains the directory until exit even if its caller is cancelled.
+    tokio::task::spawn_blocking(move || {
+        let program = command.as_std().get_program().to_string_lossy().into_owned();
+        let result = command
+            .as_std_mut()
+            .status()
+            .map_err(|err| {
+                CoreError::ModLoaderInstallFailed(format!(
+                    "failed to launch loader installer ({program}): {err}"
+                ))
+            })
+            .and_then(|status| {
+                if status.success() {
+                    Ok(())
+                } else {
+                    Err(CoreError::ModLoaderInstallFailed(format!(
+                        "loader installer exited with status {status}"
+                    )))
+                }
+            });
+        drop(staging);
+        result
+    })
+    .await
+    .map_err(|err| {
+        CoreError::ModLoaderInstallFailed(format!("loader installer task failed: {err}"))
+    })?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn installer_test_command(staging: &PrivateDirectory, control: &Path, fail: bool) -> Command {
+        std::fs::write(staging.path().join("installer.jar"), b"trusted-installer").unwrap();
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command.args(["--exact", "mod_loader::tests::installer_process_helper", "--ignored"]);
+        command.env("TRAIN_INSTALLER_TEST_DIRECTORY", staging.path());
+        command.env("TRAIN_INSTALLER_TEST_CONTROL", control);
+        command.env("TRAIN_INSTALLER_TEST_FAIL", if fail { "1" } else { "0" });
+        command
+    }
+
+    async fn wait_for_test_path(path: &Path, present: bool) {
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            while path.exists() != present {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }).await.expect("installer lifecycle reached the expected state");
+    }
+
+    #[test]
+    #[ignore = "internal child process used by installer lifecycle tests"]
+    fn installer_process_helper() {
+        let directory = std::path::PathBuf::from(std::env::var_os("TRAIN_INSTALLER_TEST_DIRECTORY").unwrap());
+        let control = std::path::PathBuf::from(std::env::var_os("TRAIN_INSTALLER_TEST_CONTROL").unwrap());
+        assert_eq!(std::fs::read(directory.join("installer.jar")).unwrap(), b"trusted-installer");
+        std::fs::write(control.join("ready"), b"ready").unwrap();
+        let started = std::time::Instant::now();
+        while !control.join("release").exists() {
+            assert!(started.elapsed() < std::time::Duration::from_secs(15));
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(std::fs::read(directory.join("installer.jar")).unwrap(), b"trusted-installer");
+        assert_ne!(std::env::var("TRAIN_INSTALLER_TEST_FAIL").as_deref(), Ok("1"), "simulated installer failure");
+    }
+
+    #[tokio::test]
+    async fn installer_staging_survives_caller_cancellation_until_process_exit() {
+        let control = tempfile::tempdir().unwrap();
+        let staging = PrivateDirectory::new("train-installer-test-").unwrap();
+        let path = staging.path().to_path_buf();
+        let command = installer_test_command(&staging, control.path(), false);
+        let caller = tokio::spawn(run_installer(command, staging));
+        wait_for_test_path(&control.path().join("ready"), true).await;
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+        assert_eq!(std::fs::read(path.join("installer.jar")).unwrap(), b"trusted-installer");
+        std::fs::write(control.path().join("release"), b"release").unwrap();
+        wait_for_test_path(&path, false).await;
+    }
+
+    #[tokio::test]
+    async fn installer_cleanup_and_errors_cover_success_failure_and_missing_java() {
+        for fail in [false, true] {
+            let control = tempfile::tempdir().unwrap();
+            let staging = PrivateDirectory::new("train-installer-test-").unwrap();
+            let path = staging.path().to_path_buf();
+            let command = installer_test_command(&staging, control.path(), fail);
+            std::fs::write(control.path().join("release"), b"release").unwrap();
+            assert_eq!(run_installer(command, staging).await.is_err(), fail);
+            assert!(!path.exists());
+        }
+        let staging = PrivateDirectory::new("train-installer-test-").unwrap();
+        let path = staging.path().to_path_buf();
+        let error = run_installer(Command::new(path.join("missing-java")), staging).await.unwrap_err();
+        assert!(error.to_string().contains("failed to launch loader installer"));
+        assert!(!path.exists());
+    }
 
     #[test]
     fn parse_recognizes_all_kinds_case_insensitively() {

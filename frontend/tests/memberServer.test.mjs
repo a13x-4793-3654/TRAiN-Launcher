@@ -89,7 +89,7 @@ test("badges use safe React text and reject malformed or oversized labels", () =
   assert.equal(workspaceBadge({ ...servers[1], style: { badge: "検証 blue" } }), "検証 blue");
 });
 
-function renderPage(page, serverList = servers, stateChanges = [], callbacks = [], effects = [], invocations = []) {
+function renderPage(page, serverList = servers, stateChanges = [], callbacks = [], effects = [], invocations = [], stateOverrides = {}, linkModals = []) {
   let stateIndex = 0;
   const overrides = {
     react: {
@@ -98,7 +98,7 @@ function renderPage(page, serverList = servers, stateChanges = [], callbacks = [
       useCallback: (fn) => { callbacks.push(fn); return fn; },
       useState: (initial) => {
         const index = stateIndex++;
-        const listState = { 0: false, 1: true, 2: serverList };
+        const listState = { 0: false, 1: true, 2: serverList, ...stateOverrides };
         return [
           page === "Servers" && index in listState ? listState[index] : initial,
           (value) => stateChanges.push({ index, value }),
@@ -112,7 +112,7 @@ function renderPage(page, serverList = servers, stateChanges = [], callbacks = [
     "@tauri-apps/api/event": { listen: () => { throw new Error("Unexpected event subscription"); } },
     "../LaunchStatus": { useLaunchStatus: () => ({ beginLaunch: () => {}, endLaunch: () => {} }) },
     "./ServerDetail": { ServerDetailPage: () => null },
-    "./AccountLinkNoticeModal": { AccountLinkNoticeModal: () => null },
+    "./AccountLinkNoticeModal": { AccountLinkNoticeModal: (props) => { linkModals.push(props); return null; } },
     "./TestModeNoticeModal": { TestModeNoticeModal: () => null },
   };
   overrides["./AuthFallbackPanel"] = loadSource("pages/AuthFallbackPanel.tsx", overrides);
@@ -123,6 +123,29 @@ function renderPage(page, serverList = servers, stateChanges = [], callbacks = [
   };
   return renderToStaticMarkup(React.createElement(module[`${page}Page`], props));
 }
+
+test("account linking IPC sends explicit consent and server ID, never tokens or identity claims", async () => {
+  const invocations = [];
+  const modals = [];
+  renderPage("Servers", servers, [], [], [], invocations, { 8: servers[0] }, modals);
+  assert.equal(modals.length, 1);
+  modals[0].onAgree();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(JSON.parse(JSON.stringify(invocations)), [{
+    command: "link_train_account",
+    args: { serverId: servers[0].id, consent: true },
+  }]);
+});
+
+test("cancelling account-link consent does not request linking or start Minecraft", () => {
+  const invocations = [];
+  const modals = [];
+  const changes = [];
+  renderPage("Servers", servers, changes, [], [], invocations, { 8: servers[0] }, modals);
+  modals[0].onCancel();
+  assert.deepEqual(invocations, []);
+  assert.ok(changes.some(change => change.index === 8 && change.value === null));
+});
 
 test("actual list and detail render each palette and the badge without styling production", () => {
   const list = renderPage("Servers");

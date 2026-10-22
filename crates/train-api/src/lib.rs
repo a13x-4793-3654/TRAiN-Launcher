@@ -14,7 +14,8 @@
 //! この環境変数に `mock` を設定する。
 //!
 //! 追加エンドポイント: `POST {base}/api/servers/{server_id}/link`(初回参加時、ランチャーが
-//! 既に確認済みのDiscord/Minecraftアカウント情報を使って紐づけを直接完了させる。
+//! Discord認証に加え、Rust内で取得したMinecraftアクセストークンで所有権を証明する。
+//! UUID・名前はバックエンドがMinecraft APIで照合し、確認済みの正規値だけを保存する。
 //! 詳細は [`LinkAccountRequest`] / [`TrainApiClient::link_account`] を参照。
 //! TRAiN側で実装済み(`GET .../config` の `linked` フィールドと合わせて提供)。
 //! 成功時のレスポンス本文(`{ "linked": true }`)は使用しない(ステータスコードのみで判定)。
@@ -45,8 +46,12 @@ pub use models::{
 pub enum TrainApiError {
     #[error("障害時接続は利用できません。管理者による有効化と対応Modの配布を確認してください")]
     FallbackUnavailable,
-    #[error("Minecraft認証サービスに接続できません。事前登録は復旧後に行ってください")]
+    #[error("Minecraft認証サービスに接続できません。紐づけ・事前登録は復旧後に行ってください")]
     MinecraftUnavailable,
+    #[error("Minecraftアカウントの所有権を確認できませんでした。Microsoftで再サインインし、同じMinecraftアカウントでやり直してください")]
+    MinecraftIdentityMismatch,
+    #[error("Minecraftの所有権証明はHTTPS接続でのみ送信できます。TRAiN APIの接続先を確認してください(HTTPはローカル開発用のループバック接続のみ許可されます)")]
+    InsecureCredentialTransport,
     #[error(
         "Minecraftアカウントの紐づけ・本人確認または参加資格を確認できませんでした。資格情報の期限切れも考えられます。期限切れの場合はMinecraft認証の復旧後に再登録してください"
     )]
@@ -62,7 +67,7 @@ pub enum TrainApiError {
     #[error("このDiscordアカウントでは所属サーバー情報を取得できません")]
     Forbidden,
     /// `400`: パスパラメータの形式が不正(Discordスノーフレーク/UUIDでない等)。
-    #[error("リクエスト内容が正しくありません")]
+    #[error("リクエスト内容が正しくありません。ランチャーを更新し、再サインインしてやり直してください")]
     InvalidRequest,
     /// `404 not_found`: サーバーが存在しない、または本人がそのギルドのメンバーでない。
     #[error("サーバーが見つからないか、参加資格がありません")]
@@ -135,7 +140,8 @@ async fn map_error_response(response: reqwest::Response) -> TrainApiError {
     match (status, code.as_str()) {
         (409, "fallback_unavailable") => TrainApiError::FallbackUnavailable,
         (503, "minecraft_unavailable") => TrainApiError::MinecraftUnavailable,
-        (403, "link_required" | "login_denied" | "minecraft_identity_mismatch") => TrainApiError::FallbackDenied,
+        (403, "minecraft_identity_mismatch") => TrainApiError::MinecraftIdentityMismatch,
+        (403, "link_required" | "login_denied") => TrainApiError::FallbackDenied,
         (401, _) => TrainApiError::Unauthorized,
         (403, "not_linked") => TrainApiError::NotLinked,
         (403, _) => TrainApiError::Forbidden,
@@ -152,6 +158,17 @@ async fn map_error_response(response: reqwest::Response) -> TrainApiError {
             status,
             code,
         },
+    }
+}
+
+async fn map_credential_error(response: reqwest::Response) -> TrainApiError {
+    match map_error_response(response).await {
+        // A nonconforming server must not echo proof data back through an IPC error.
+        TrainApiError::Api { status, .. } => TrainApiError::Api {
+            status,
+            code: "unexpected_response".into(),
+        },
+        error => error,
     }
 }
 
@@ -183,8 +200,8 @@ pub trait TrainApiClient: Send + Sync {
     /// 指定サーバーの設定(接続先・Mod構成・リソースパックなど)を取得する。
     async fn get_server_config(&self, server_id: &str) -> Result<ServerConfig, TrainApiError>;
 
-    /// ランチャーが既に確認済みのMinecraftアカウント情報(Microsoft/Xbox認証済みの
-    /// UUID・プレイヤー名)を使い、Discordアカウントとの紐づけを直接完了させる。
+    /// MinecraftアクセストークンをRust内で取得・更新し、Discordアカウントとの紐づけを
+    /// 申請する。サーバーはMinecraft APIで毎回所有権とUUID・名前を検証する。
     ///
     /// 通常の手順(Minecraft参加時にゲーム内へ表示される認証コードをDiscordの
     /// `/link` コマンドへ入力する)を経由しない代替経路。呼び出し元は事前にユーザーへ
@@ -256,9 +273,10 @@ impl TrainApiClient for MockTrainApiClient {
     async fn link_account(
         &self,
         _server_id: &str,
-        _request: &LinkAccountRequest,
+        request: &LinkAccountRequest,
     ) -> Result<(), TrainApiError> {
-        // モック環境では常に成功させる(UI側の同意〜完了までの流れを確認できるようにする)。
+        request.body()?;
+        // モックは実際の所有権を確認しないが、証明が欠けたリクエストは成功させない。
         Ok(())
     }
 
@@ -361,6 +379,30 @@ impl HttpTrainApiClient {
             None => request,
         }
     }
+
+    fn credential_post(&self, path: &str) -> Result<reqwest::RequestBuilder, TrainApiError> {
+        let url = reqwest::Url::parse(&format!("{}{path}", self.base_url))
+            .map_err(|_| TrainApiError::InsecureCredentialTransport)?;
+        let loopback = url.host_str().is_some_and(|host| {
+            host == "localhost" || host.trim_matches(['[', ']'])
+                .parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback())
+        });
+        if (url.scheme() != "https" && !(url.scheme() == "http" && loopback))
+            || !url.username().is_empty() || url.password().is_some()
+            || url.query().is_some() || url.fragment().is_some()
+        {
+            return Err(TrainApiError::InsecureCredentialTransport);
+        }
+        let builder = reqwest::Client::builder()
+            .https_only(url.scheme() == "https")
+            .redirect(reqwest::redirect::Policy::none());
+        let client = if loopback { builder.no_proxy() } else { builder }.build()?;
+        let request = client.post(url);
+        Ok(match &self.discord_access_token {
+            Some(token) => request.bearer_auth(token),
+            None => request,
+        })
+    }
 }
 
 #[async_trait]
@@ -375,10 +417,10 @@ impl TrainApiClient for HttpTrainApiClient {
 
     async fn enroll_fallback(&self, server_id: &str, request: &fallback::CredentialRequest)
         -> Result<fallback::CredentialReceipt, TrainApiError> {
-        let response = self.post(&format!("/api/servers/{server_id}/auth-fallback/credentials"))
+        let response = self.credential_post(&format!("/api/servers/{server_id}/auth-fallback/credentials"))?
             .json(request).send().await?;
         if !response.status().is_success() {
-            return Err(map_error_response(response).await);
+            return Err(map_credential_error(response).await);
         }
         Ok(response.json().await?)
     }
@@ -423,13 +465,15 @@ impl TrainApiClient for HttpTrainApiClient {
         server_id: &str,
         request: &LinkAccountRequest,
     ) -> Result<(), TrainApiError> {
+        let body = request.body()?;
         let response = self
-            .post(&format!("/api/servers/{server_id}/link"))
-            .json(request)
+            .credential_post(&format!("/api/servers/{server_id}/link"))?
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body)
             .send()
             .await?;
         if !response.status().is_success() {
-            return Err(map_error_response(response).await);
+            return Err(map_credential_error(response).await);
         }
         Ok(())
     }
@@ -502,6 +546,138 @@ pub fn create_client(discord_access_token: Option<String>) -> Box<dyn TrainApiCl
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use super::fallback::tests::server;
+
+    fn link_request() -> LinkAccountRequest {
+        LinkAccountRequest {
+            mc_uuid: "00000000-0000-4000-8000-000000000001".into(),
+            mc_name: "Player".into(),
+            minecraft_access_token: "synthetic-minecraft-proof".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn normal_link_sends_discord_and_exact_ownership_proof_body() {
+        let (client, captured) = server(200, r#"{"linked":true}"#).await;
+        let request = link_request();
+        client.link_account("server", &request).await.unwrap();
+        let raw = captured.await.unwrap();
+        assert!(raw.starts_with("POST /api/servers/server/link "));
+        let (headers, body) = raw.split_once("\r\n\r\n").unwrap();
+        assert!(headers.to_lowercase().contains("authorization: bearer discord-proof"));
+        assert!(!headers.contains(&request.minecraft_access_token));
+        assert!(body.len() <= 4096);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(body).unwrap(),
+            serde_json::json!({
+                "mc_uuid": request.mc_uuid, "mc_name": request.mc_name,
+                "minecraft_access_token": request.minecraft_access_token,
+            })
+        );
+        assert!(!format!("{request:?}").contains(&request.minecraft_access_token));
+    }
+
+    #[tokio::test]
+    async fn link_proof_errors_remain_distinct_from_discord_and_uniqueness_errors() {
+        for (status, body, expected) in [
+            (400, r#"{"error":"invalid_body"}"#, "invalid"),
+            (403, r#"{"error":"minecraft_identity_mismatch"}"#, "minecraft"),
+            (503, r#"{"error":"minecraft_unavailable"}"#, "unavailable"),
+            (401, r#"{"error":"unauthorized"}"#, "discord"),
+            (404, r#"{"error":"not_found"}"#, "hidden"),
+            (409, r#"{"error":"already_linked"}"#, "discord-conflict"),
+            (409, r#"{"error":"uuid_already_linked"}"#, "minecraft-conflict"),
+        ] {
+            let (client, captured) = server(status, body).await;
+            let error = client.link_account("server", &link_request()).await.unwrap_err();
+            assert!(matches!((expected, error),
+                ("invalid", TrainApiError::InvalidRequest)
+                | ("minecraft", TrainApiError::MinecraftIdentityMismatch)
+                | ("unavailable", TrainApiError::MinecraftUnavailable)
+                | ("discord", TrainApiError::Unauthorized)
+                | ("hidden", TrainApiError::NotFound)
+                | ("discord-conflict", TrainApiError::AlreadyLinked)
+                | ("minecraft-conflict", TrainApiError::UuidAlreadyLinked)
+            ));
+            assert!(captured.await.unwrap().starts_with("POST /api/servers/server/link "));
+        }
+        let (client, captured) = server(418, r#"{"error":"synthetic-minecraft-proof"}"#).await;
+        let error = client.link_account("server", &link_request()).await.unwrap_err();
+        assert!(!error.to_string().contains("synthetic-minecraft-proof"));
+        assert!(!format!("{error:?}").contains("synthetic-minecraft-proof"));
+        captured.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn missing_or_oversized_proof_fails_before_http_and_in_mock() {
+        let client = HttpTrainApiClient::new("http://127.0.0.1:1", None);
+        for proof in ["".into(), " \t\n".into(), "x".repeat(3073), "\"".repeat(3072)] {
+            let mut request = link_request();
+            request.minecraft_access_token = proof;
+            for client in [&client as &dyn TrainApiClient, &MockTrainApiClient] {
+                assert!(matches!(client.link_account("server", &request).await, Err(TrainApiError::InvalidRequest)));
+            }
+        }
+        let mut request = link_request();
+        request.minecraft_access_token = "x".into();
+        MockTrainApiClient.link_account("server", &request).await.unwrap();
+        request.minecraft_access_token = "x".repeat(3072);
+        assert!(request.body().unwrap().len() <= 4096);
+        MockTrainApiClient.link_account("server", &request).await.unwrap();
+        let escapes = 4096 - request.body().unwrap().len();
+        request.minecraft_access_token.replace_range(..escapes, &"\"".repeat(escapes));
+        assert_eq!(request.body().unwrap().len(), 4096);
+        request.minecraft_access_token.replace_range(escapes..escapes + 1, "\"");
+        assert!(matches!(request.body(), Err(TrainApiError::InvalidRequest)));
+    }
+
+    #[test]
+    fn ownership_proof_transport_rejects_plaintext_remote_and_url_credentials() {
+        for base in [
+            "http://example.com", "http://192.0.2.1", "http://localhost.example.com",
+            "ftp://example.com", "https://user:password@example.com",
+            "https://example.com?token=untrusted", "https://example.com#fragment", "not a url",
+        ] {
+            let client = HttpTrainApiClient::new(base, None);
+            assert!(matches!(client.credential_post("/api/servers/server/link"), Err(TrainApiError::InsecureCredentialTransport)));
+        }
+        for base in ["https://example.com", "http://localhost:8787", "http://127.0.0.1:8787", "http://[::1]:8787"] {
+            let client = HttpTrainApiClient::new(base, None);
+            assert!(client.credential_post("/api/servers/server/link").is_ok());
+        }
+    }
+
+    #[tokio::test]
+    async fn proof_is_never_redirected_even_to_another_loopback_endpoint() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+        use tokio::time::{timeout, Duration};
+        let origin = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_url = format!("http://{}/capture", target.local_addr().unwrap());
+        let client = HttpTrainApiClient::new(format!("http://{}", origin.local_addr().unwrap()), Some("discord-proof".into()));
+        let redirect = tokio::spawn(async move {
+            let (mut stream, _) = origin.accept().await.unwrap();
+            let mut bytes = [0; 8192];
+            assert!(stream.read(&mut bytes).await.unwrap() > 0);
+            stream.write_all(format!("HTTP/1.1 307 Temporary Redirect\r\nLocation: {target_url}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
+        });
+        let capture = tokio::spawn(async move {
+            if let Ok(Ok((mut stream, _))) = timeout(Duration::from_millis(500), target.accept()).await {
+                let mut bytes = [0; 8192];
+                stream.read(&mut bytes).await.unwrap();
+                stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
+                return true;
+            }
+            false
+        });
+        let error = client.link_account("server", &link_request()).await.unwrap_err();
+        assert!(matches!(error, TrainApiError::Api { status: 307, .. }));
+        redirect.await.unwrap();
+        assert!(!capture.await.unwrap());
+    }
+
     #[tokio::test]
     async fn member_server_http_response_preserves_workspace_metadata_for_ipc() {
         use super::{HttpTrainApiClient, TrainApiClient};

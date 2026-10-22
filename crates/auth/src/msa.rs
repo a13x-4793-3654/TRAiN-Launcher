@@ -35,12 +35,22 @@ pub const MSA_NATIVE_CLIENT_REDIRECT_URI: &str =
 const MSA_SCOPES: &str = "XboxLive.signin offline_access";
 
 /// MSAサインインで得られるMicrosoftアクセストークン。
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct MsaToken {
     pub access_token: String,
     pub refresh_token: Option<String>,
     /// アクセストークンの有効期限(UNIX epoch秒)。
     pub expires_at: Option<i64>,
+}
+
+impl std::fmt::Debug for MsaToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MsaToken")
+            .field("access_token", &"<redacted>")
+            .field("refresh_token", &self.refresh_token.as_ref().map(|_| "<redacted>"))
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
 }
 
 /// 埋め込みWebViewで表示すべき認可URLと、コード交換に必要な付随情報(CSRF検証・PKCE検証用)。

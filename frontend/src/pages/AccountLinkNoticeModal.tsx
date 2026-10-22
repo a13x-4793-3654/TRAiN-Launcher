@@ -121,19 +121,21 @@ export function AccountLinkNoticeModal(props: {
               <div className={styles.section}>
                 <Text weight="semibold">2. これから行われる処理</Text>
                 <Body1 as="p" block>
-                  「同意して連携する」を押すと、ランチャーが既に確認済みの次の情報を
-                  使って、TRAiNへ紐づけを直接申請します。
+                  「同意して連携する」を押すと、ランチャーが次のアカウントを確認し、
+                  TRAiNへ紐づけを直接申請します。
                 </Body1>
                 <Body1 as="p" block>
                   ・Discordアカウント(このランチャーでサインイン済みのアカウント)
                   <br />
-                  ・Minecraftアカウント(Microsoft/Xboxで認証済みのプレイヤー名とUUID)
+                  ・Minecraftアカウント(Microsoft/Xboxで認証済みのプレイヤー名とUUID、
+                  所有権確認用のMinecraftアクセストークン)
                 </Body1>
                 <Body1 as="p" block>
                   本来はMinecraft参加時にゲーム内へ表示される認証コードを、Discordで
-                  「/link」コマンドへ入力する手順です。ランチャーは両方のアカウントを
-                  既にサインインで確認済みのため、この画面での同意をもってその手順を
-                  省略し、直接紐づけを行います。
+                  「/link」コマンドへ入力する手順です。この画面で同意すると、ランチャーが
+                  認証情報を内部で取得・更新し、TRAiNがMinecraftの認証サービスへ問い合わせて
+                  所有権と本人情報を確認することで、その手順を省略します。
+                  MinecraftのパスワードやMicrosoftのリフレッシュトークンはTRAiNへ送りません。
                 </Body1>
               </div>
 

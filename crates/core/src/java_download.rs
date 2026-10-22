@@ -578,7 +578,9 @@ fn extract_zip(file: File, root: &Path) -> Result<(), String> {
         let mut entry = archive
             .by_index(index)
             .map_err(|err| format!("JavaのZIPエントリを読み取れません: {err}"))?;
-        let relative = safe_relative_path(entry.name())?;
+        let name = entry.name()
+            .map_err(|err| format!("JavaのZIPエントリ名を読み取れません: {err}"))?;
+        let relative = safe_relative_path(&name)?;
         let mode = entry.unix_mode();
         if mode.is_some_and(|mode| {
             let kind = mode & 0o170000;

@@ -20,8 +20,11 @@ tempfile = "3"
 # レガシーバージョン(LWJGL2世代)のネイティブライブラリjar展開に使用。
 # bzip2/lzma/zstd等はMinecraftのネイティブjarでは使われないため、C コンパイラ不要な
 # 素のDEFLATE実装(zlib-rs/zopfliはいずれもピュアRust実装)のみを有効化する。
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "9.0.5", default-features = false, features = ["deflate"] }
 # プロファイル設定やゲームデータの既定保存先(OS毎のアプリデータディレクトリ)を解決するために使用。
 dirs = "5"
 # 公式Minecraft Launcherの launcher_profiles.json に書き込む作成/最終使用日時(ISO 8601)に使用。
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Authorization", "Win32_Storage_FileSystem"] }

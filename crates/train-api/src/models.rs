@@ -69,13 +69,41 @@ pub struct ServerConfig {
 
 /// [`TrainApiClient::link_account`] のリクエスト本体。
 ///
-/// ランチャーが既に確認済みの、Microsoft/Xbox認証済みMinecraftアカウント情報を渡す
-/// (ゲーム内で表示される認証コード + Discordの `/link` コマンドという通常の手順を
-/// 経由せず、ランチャー自身が本人性を証明した上で直接紐づける)。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Rust内で取得・更新したMinecraftアクセストークンで所有権を証明する。
+/// UUID・名前は照合用の申告値であり、保存する本人情報はバックエンドがMinecraft APIから
+/// 確認する。この型をIPCレスポンスやフロントエンドの入力として使用しないこと。
+#[derive(Clone, Serialize)]
 pub struct LinkAccountRequest {
     pub mc_uuid: String,
     pub mc_name: String,
+    pub minecraft_access_token: String,
+}
+
+impl std::fmt::Debug for LinkAccountRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LinkAccountRequest")
+            .field("mc_uuid", &self.mc_uuid)
+            .field("mc_name", &self.mc_name)
+            .field("minecraft_access_token", &"<redacted>")
+            .finish()
+    }
+}
+
+impl LinkAccountRequest {
+    pub(crate) fn body(&self) -> Result<Vec<u8>, crate::TrainApiError> {
+        if self.minecraft_access_token.trim().is_empty()
+            || self.minecraft_access_token.chars().count() > 3072
+            || self.mc_uuid.is_empty()
+            || self.mc_name.is_empty()
+        {
+            return Err(crate::TrainApiError::InvalidRequest);
+        }
+        let body = serde_json::to_vec(self).map_err(|_| crate::TrainApiError::InvalidRequest)?;
+        if body.len() > 4096 {
+            return Err(crate::TrainApiError::InvalidRequest);
+        }
+        Ok(body)
+    }
 }
 
 /// お知らせ1件(グローバル/サーバー個別で共通の形式)。

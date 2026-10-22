@@ -1,0 +1,15 @@
+{
+  "release": "v0.1.13",
+  "source": "https://api.github.com/repos/a13x-4793-3654/TRAiN-Launcher/releases/assets/632996228",
+  "platforms": {
+    "linux-x86_64": "TRAiN.Launcher_0.1.13_amd64.AppImage",
+    "linux-x86_64-appimage": "TRAiN.Launcher_0.1.13_amd64.AppImage",
+    "linux-x86_64-deb": "TRAiN.Launcher_0.1.13_amd64.deb",
+    "linux-x86_64-rpm": "TRAiN.Launcher-0.1.13-1.x86_64.rpm",
+    "windows-x86_64": "TRAiN.Launcher_0.1.13_x64-setup.exe",
+    "windows-x86_64-nsis": "TRAiN.Launcher_0.1.13_x64-setup.exe",
+    "windows-x86_64-msi": "TRAiN.Launcher_0.1.13_x64_en-US.msi",
+    "darwin-aarch64": "TRAiN.Launcher_aarch64.app.tar.gz",
+    "darwin-x86_64": "TRAiN.Launcher_x64.app.tar.gz"
+  }
+}

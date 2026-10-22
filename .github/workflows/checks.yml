@@ -35,6 +35,18 @@ jobs:
           $legacy = $tree | Where-Object { $_ -match '^zip v(\d+)\.' -and [int]$Matches[1] -lt 9 }
           if ($legacy) { throw 'Unsupported legacy ZIP dependency in the Windows runtime tree' }
 
+  macos:
+    name: macOS desktop normal-feature check
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable (2026-10-16)
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Compile desktop and updater with normal features
+        run: cargo check --locked -p train-launcher-desktop --lib
+
   frontend:
     runs-on: ubuntu-22.04
     steps:

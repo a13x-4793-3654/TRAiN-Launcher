@@ -23,11 +23,21 @@ use crate::version_manifest::{ArgumentEntry, ArgumentValue, ResolvedVersion, Ver
 use crate::CoreError;
 
 /// 起動に必要な認証情報(Minecraftトークンへ変換済みのもの)。
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct LaunchAuth {
     pub username: String,
     pub uuid: String,
     pub access_token: String,
+}
+
+impl std::fmt::Debug for LaunchAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LaunchAuth")
+            .field("username", &self.username)
+            .field("uuid", &self.uuid)
+            .field("access_token", &"<redacted>")
+            .finish()
+    }
 }
 
 /// プロファイルからMinecraft起動コマンド(実行ファイル + 引数)を構築する。
@@ -288,6 +298,18 @@ fn add_fallback_arguments(command: &mut Vec<String>, ticket_path: &Path, address
 #[cfg(test)]
 mod fallback_tests {
     use super::*;
+
+    #[test]
+    fn launch_auth_debug_never_contains_minecraft_access_token() {
+        let auth = LaunchAuth {
+            username: "Player".into(),
+            uuid: "00000000-0000-4000-8000-000000000001".into(),
+            access_token: "synthetic-minecraft-proof".into(),
+        };
+        let debug = format!("{auth:?}");
+        assert!(!debug.contains(&auth.access_token));
+        assert!(debug.contains("<redacted>"));
+    }
 
     #[test]
     fn ticket_path_precedes_main_and_address_is_not_normalized() {

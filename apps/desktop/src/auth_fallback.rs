@@ -286,7 +286,7 @@ struct TicketFile<'a> {
 }
 
 pub struct PrivateTicket {
-    _directory: tempfile::TempDir,
+    _directory: train_launcher_core::private_directory::PrivateDirectory,
     pub path: PathBuf,
     pub expires_at: u64,
     registry: TicketRegistry,
@@ -318,11 +318,8 @@ impl PrivateTicket {
         if bytes.len() > 4096 {
             return Err("チケットファイルが4096バイトを超えています".into());
         }
-        let directory = tempfile::Builder::new()
-            .prefix("train-auth-fallback-")
-            .tempdir()
+        let directory = train_launcher_core::private_directory::PrivateDirectory::new("train-auth-fallback-")
             .map_err(|_| "チケット用ディレクトリを作成できません")?;
-        secure_directory(directory.path())?;
         let path = directory
             .path()
             .canonicalize()
@@ -380,72 +377,6 @@ impl Drop for PrivateTicket {
             }
         }
     }
-}
-
-#[cfg(unix)]
-fn secure_directory(path: &Path) -> Result<(), String> {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
-        .map_err(|_| "チケットの所有者限定アクセス権を設定できません".into())
-}
-
-#[cfg(windows)]
-fn secure_directory(path: &Path) -> Result<(), String> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::{
-        Foundation::LocalFree,
-        Security::{
-            Authorization::{
-                ConvertStringSecurityDescriptorToSecurityDescriptorW, SetNamedSecurityInfoW,
-                SE_FILE_OBJECT,
-            },
-            GetSecurityDescriptorDacl, DACL_SECURITY_INFORMATION,
-            PROTECTED_DACL_SECURITY_INFORMATION,
-        },
-    };
-    let sddl: Vec<u16> = "D:P(A;OICI;FA;;;OW)\0".encode_utf16().collect();
-    let path: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
-    // Protected DACL: only the owner, including inherited permissions on the ticket file.
-    unsafe {
-        let mut descriptor = std::ptr::null_mut();
-        if ConvertStringSecurityDescriptorToSecurityDescriptorW(
-            sddl.as_ptr(),
-            1,
-            &mut descriptor,
-            std::ptr::null_mut(),
-        ) == 0
-        {
-            return Err("チケットの所有者限定ACLを作成できません".into());
-        }
-        let mut dacl = std::ptr::null_mut();
-        let mut present = 0;
-        let mut defaulted = 0;
-        let extracted =
-            GetSecurityDescriptorDacl(descriptor, &mut present, &mut dacl, &mut defaulted);
-        let result = if extracted != 0 && present != 0 && !dacl.is_null() {
-            SetNamedSecurityInfoW(
-                path.as_ptr(),
-                SE_FILE_OBJECT,
-                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                dacl,
-                std::ptr::null_mut(),
-            )
-        } else {
-            1
-        };
-        LocalFree(descriptor);
-        if result != 0 {
-            return Err("チケットの所有者限定ACLを設定できません。接続を中止しました".into());
-        }
-    }
-    Ok(())
-}
-
-#[cfg(not(any(unix, windows)))]
-fn secure_directory(_path: &Path) -> Result<(), String> {
-    Err("このOSでは安全なチケット保存を利用できません".into())
 }
 
 #[cfg(test)]

@@ -464,39 +464,85 @@ async fn get_server_config(
         .map_err(|err| err.to_string())
 }
 
-/// ランチャーが既に確認済みのアカウント情報を使い、Discord↔Minecraftアカウントの紐づけを
-/// 直接完了させる(初回参加時の注意事項モーダルで同意した後に呼び出される)。
-///
-/// 通常はMinecraft参加時にゲーム内へ表示される認証コードをDiscordの `/link` コマンドへ
-/// 入力する手順だが、ランチャーは既に (1) Discordサインインで確認済みのDiscordアカウント、
-/// (2) Microsoft/Xbox認証済みのMinecraftアカウント(UUID・プレイヤー名)の両方を保持して
-/// いるため、それらをそのままTRAiN側へ渡して紐づけを完結させる。
+/// 同意後にRust内でMinecraftの所有権証明を取得・更新し、TRAiNへ紐づけを申請する。
+/// IPCの入力はサーバーID・同意だけで、認証トークンをJavaScriptへ渡さない。
 #[tauri::command]
-async fn link_train_account(app_handle: AppHandle, server_id: String) -> Result<(), String> {
+async fn link_train_account(app_handle: AppHandle, server_id: String, consent: bool) -> Result<(), String> {
+    if !consent {
+        return Err("アカウントの紐づけには説明を確認した上での同意が必要です".into());
+    }
     let discord_access_token = current_discord_token(&app_handle)
         .await?
         .ok_or_else(|| "Discordアカウントでサインインしてください".to_string())?
         .access_token;
 
-    let microsoft_token = store::load_token(Provider::Microsoft)
-        .map_err(|err| err.to_string())?
-        .ok_or_else(|| "Microsoftアカウントでサインインしてください".to_string())?;
-    let mc_uuid = microsoft_token.uuid.ok_or_else(|| {
-        "MinecraftのUUIDが取得できていません。サインアウトして再度サインインしてください"
-            .to_string()
-    })?;
-    let mc_name = microsoft_token
-        .display_name
-        .ok_or_else(|| "Minecraftのプレイヤー名が取得できていません".to_string())?;
+    let request = account_link_request(ensure_valid_microsoft_token().await?)?;
 
     let client = train_launcher_server_api::create_client(Some(discord_access_token));
     client
         .link_account(
             &server_id,
-            &train_launcher_server_api::LinkAccountRequest { mc_uuid, mc_name },
+            &request,
         )
         .await
         .map_err(|err| err.to_string())
+}
+
+fn account_link_request(token: TokenRecord) -> Result<train_launcher_server_api::LinkAccountRequest, String> {
+    let (mc_uuid, mc_name) = auth_fallback::identity(&token)?;
+    Ok(train_launcher_server_api::LinkAccountRequest {
+        mc_uuid,
+        mc_name,
+        minecraft_access_token: token.access_token,
+    })
+}
+
+#[cfg(test)]
+mod account_link_tests {
+    use super::*;
+
+    fn minecraft_record() -> TokenRecord {
+        TokenRecord {
+            access_token: "synthetic-minecraft-proof".into(),
+            refresh_token: Some("synthetic-microsoft-refresh".into()),
+            expires_at: None,
+            uuid: Some("00000000000040008000000000000001".into()),
+            display_name: Some("Player".into()),
+            user_id: None,
+        }
+    }
+
+    #[test]
+    fn proof_uses_rust_credentials_and_only_minecraft_access_token_reaches_api_body() {
+        let request = account_link_request(minecraft_record()).unwrap();
+        assert_eq!(serde_json::to_value(&request).unwrap(), serde_json::json!({
+            "mc_uuid": "00000000-0000-4000-8000-000000000001",
+            "mc_name": "Player",
+            "minecraft_access_token": "synthetic-minecraft-proof",
+        }));
+        assert!(!format!("{request:?}").contains("synthetic-minecraft-proof"));
+        for record in [
+            TokenRecord { uuid: None, ..minecraft_record() },
+            TokenRecord { display_name: Some("invalid player".into()), ..minecraft_record() },
+        ] {
+            assert!(account_link_request(record).is_err());
+        }
+    }
+
+    #[test]
+    fn authentication_ipc_responses_contain_display_names_only() {
+        assert_eq!(
+            serde_json::to_value(SignInResult { display_name: "Player".into() }).unwrap(),
+            serde_json::json!({"display_name":"Player"})
+        );
+        assert_eq!(
+            serde_json::to_value(AuthStatus {
+                discord_display_name: Some("DiscordUser".into()),
+                microsoft_display_name: Some("Player".into()),
+            }).unwrap(),
+            serde_json::json!({"discord_display_name":"DiscordUser","microsoft_display_name":"Player"})
+        );
+    }
 }
 
 /// 全ランチャー共通のグローバルお知らせを新しい順に取得する(ホーム画面用)。

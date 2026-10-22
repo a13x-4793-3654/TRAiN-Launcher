@@ -32,12 +32,12 @@ pub struct FallbackTicket {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::{HttpTrainApiClient, TrainApiClient, TrainApiError};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    async fn server(
+    pub(crate) async fn server(
         status: u16,
         body: &'static str,
     ) -> (HttpTrainApiClient, tokio::task::JoinHandle<String>) {
@@ -141,7 +141,7 @@ mod tests {
             assert!(match (status, result) {
                 (409, Err(TrainApiError::FallbackUnavailable))
                 | (503, Err(TrainApiError::MinecraftUnavailable))
-                | (403, Err(TrainApiError::FallbackDenied))
+                | (403, Err(TrainApiError::FallbackDenied | TrainApiError::MinecraftIdentityMismatch))
                 | (401, Err(TrainApiError::Unauthorized)) => true,
                 _ => false,
             });

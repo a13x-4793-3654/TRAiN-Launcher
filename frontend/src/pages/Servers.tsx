@@ -284,7 +284,7 @@ export function ServersPage() {
     const server = linkNoticeServer;
     setLinking(true);
     setLinkError(null);
-    invoke("link_train_account", { serverId: server.id })
+    invoke("link_train_account", { serverId: server.id, consent: true })
       .then(() => {
         setLinking(false);
         setLinkNoticeServer(null);

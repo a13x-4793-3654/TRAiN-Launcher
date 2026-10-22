@@ -15,11 +15,21 @@ use crate::AuthError;
 const MINECRAFT_PROFILE_URL: &str = "https://api.minecraftservices.com/minecraft/profile";
 
 /// Minecraftの認証済みトークン。
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct MinecraftToken {
     pub access_token: String,
     pub uuid: Option<String>,
     pub username: Option<String>,
+}
+
+impl std::fmt::Debug for MinecraftToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MinecraftToken")
+            .field("access_token", &"<redacted>")
+            .field("uuid", &self.uuid)
+            .field("username", &self.username)
+            .finish()
+    }
 }
 
 #[derive(Debug, Deserialize)]

@@ -21,7 +21,7 @@ TRAiN Launcher は、TRAiN 管理下のサーバーに参加しているユー�
 - 対応する Java が見つからない場合は Eclipse Adoptium の Temurin JRE を自動ダウンロードし、SHA-256・サイズ・実際のバージョンとアーキテクチャを検証してから使用する。保存先はランチャー設定ディレクトリ配下の `runtimes/installed` (Windows: `%APPDATA%\train-launcher\runtimes\installed`)で、次回以降は再利用する。システムの Java、`PATH`、保存済みの Java パス設定は変更しない。初回取得にはインターネット接続が必要で、取得失敗や対象環境向けの配布がない場合は理由を表示して起動を中止する
 - **Fabric / Quilt / Forge / NeoForge** の前提Modローダーをプロファイルの設定だけで自動導入(未導入の場合のみ実行され、既に導入済みなら再導入はしない)
   - Fabric / Quilt は公式Meta APIから完全なバージョン情報を取得して導入
-  - Forge / NeoForge は公式インストーラjarをダウンロードし、ヘッドレスモードで実行して導入(GUIは表示されない)
+  - Forge / NeoForge は公式インストーラjarをダウンロードし、ヘッドレスモードで実行して導入(GUIは表示されない)。インストーラは毎回新しい所有者限定の一時ディレクトリに排他的に作成し、Javaの終了まで保持する。呼び出し処理の中断でも実行中の保存先は削除せず、終了・起動失敗後に片付ける。共有の固定一時フォルダーや既存のインストーラは再利用しない
   - ローダーバージョンを指定しない場合は安定版の最新(Forge/NeoForgeは推奨版)を自動選択
 - プロファイルごとに Mod の取得元 URL (Modrinth / CurseForge など) を入力するだけで、自動的に取得・設置
 - 前提Mod(依存Mod)を自動的に解決し、依存関係も含めて自動インストールすることで、ユーザーが個別に依存関係を調べて導入する手間をなくす
@@ -54,6 +54,7 @@ TRAiN Launcher は、TRAiN 管理下のサーバーに参加しているユー�
 - Discord サインインには Discord OAuth2 を利用
 - 認証フロー自体は `crates/auth` に実装済み(MSAはデバイスコードフロー、DiscordはPKCE付き認可コードフロー+ローカルループバックサーバでのリダイレクト受信)。取得したトークンはOSの資格情報ストア(Windows Credential Manager / macOS Keychain / Linux Secret Service)に保存される
 - Discord のアクセストークンは、ランチャー起動時と起動中の定期確認(1分ごと)、サーバー API 利用前に有効期限を確認し、期限の5分前から保存済みリフレッシュトークンで自動更新する。更新できない場合は再サインインが必要になる
+- 通常のアカウント紐づけも、説明への同意後にRust内でMinecraft認証情報を取得・更新し、Minecraftアクセストークンを所有権証明としてTRAiNへ送る。TRAiNがMinecraft APIでUUID・プレイヤー名を照合し、確認済みの正規値だけを保存する。トークンはJavaScript・IPC応答・Debug表示・クラッシュレポートに出さず、MicrosoftのリフレッシュトークンはTRAiNへ送らない。認証サービスの障害時や所有権の不一致時は紐づけを停止し、証明なしの旧経路には切り替えない。既存の紐づけ・Discord認可・1対1の制約は維持する
 
 ### Mojang障害時接続（任意・事前登録が必要）
 
@@ -77,7 +78,7 @@ TRAiN Launcher は、TRAiN 管理下のサーバーに参加しているユー�
 
 ### 前提条件
 
-- **Rust** (stable) — [rustup](https://rustup.rs/) 経由でインストールしてください
+- **Rust** 1.90 以上 (stable推奨) — [rustup](https://rustup.rs/) 経由でインストールしてください
   - Windows の場合は Visual Studio Build Tools の「C++ によるデスクトップ開発」ワークロード(MSVC ツールセット・Windows SDK)が必要です
 - **Node.js** 20.x 以上 と npm
 - **Tauri CLI の前提条件**(WebView2 ランタイムなど): [Tauri Prerequisites](https://tauri.app/start/prerequisites/) を参照してください
@@ -106,6 +107,7 @@ TRAiN Launcher は、TRAiN 管理下のサーバーに参加しているユー�
    ```
 
 Workspace 表示の回帰テストは `npm run test --workspace=frontend`、API のメタデータ保持・互換性テストは `cargo test -p train-launcher-server-api` で実行できます。
+`.github/workflows/checks.yml` は署名キーを使わず、Linux/Windowsでコア・認証・APIの回帰テスト、WindowsでデスクトップIPC/所有者限定ACL、フロントエンドのテストとビルドを確認します。Unixの0700/0600・親ディレクトリ置換/リンク攻撃と、Windowsの保護DACL・実行終了までの保存先保持は、それぞれ対象OSで検証します。
 
 ### サインイン機能を試すための環境変数(OAuth2アプリ登録)
 
@@ -149,6 +151,20 @@ TRAiN側のAPI仕様は確定済みです(TRAiNリポジトリの `docs/LAUNCHER
 
 お知らせ機能(`GET {base}/api/announcements` / `GET {base}/api/servers/{server_id}/announcements`)も同じ `TRAIN_LAUNCHER_API_BASE_URL` を使うため、新しい環境変数は不要です。
 
+#### アカウント紐づけの所有権証明
+
+`POST {base}/api/servers/{server_id}/link` はDiscordのBearer認証に加え、JSON本文の `mc_uuid`、`mc_name`、`minecraft_access_token` が必須です。トークンは1〜3072文字(空白のみは不可)、本文全体は4096バイト以下です。UUID・名前は照合用の申告値で、バックエンドは冪等な再試行を含め毎回Minecraft APIで所有権を検証し、確認済みの正規UUID・名前だけを保存します。フロントエンドは `link_train_account` に `serverId` と `consent: true` だけを渡し、Rustが通常起動と同じ安全な認証更新フローで証明を用意します。
+
+| 応答 | 意味・対応 |
+| --- | --- |
+| `200 {"linked":true}` | 紐づけ完了 |
+| `400 invalid_body` | 証明または申告値が欠落・不正。ランチャーを更新して再サインイン |
+| `403 minecraft_identity_mismatch` | 証明が無効・期限切れ・プロフィールなし、またはUUID/名前が不一致。Microsoftで再サインイン(Discordの401とは別) |
+| `503 minecraft_unavailable` | Minecraft認証サービスの障害。復旧後に再試行 |
+| `401 unauthorized` / `404 not_found` / `409 already_linked`・`uuid_already_linked` | 従来のDiscord認証・非開示・一意性制約を維持 |
+
+所有権証明を送る紐づけ・障害時事前登録APIはHTTPS必須で、HTTPは明示的なローカル開発用の `localhost` / ループバックIPだけを許可します。リダイレクト先には認証情報を転送しません。**所有権証明のない旧ランチャーは修正済みバックエンドに対して400で失敗します**。これは意図したセキュリティ互換性変更です。ランチャーを先に配布し、続いてバックエンドで証明を必須化できます(旧バックエンドは追加フィールドを無視)。証明を省いた自動リトライや障害時認証への自動切替はありません。
+
 例(PowerShellで、ローカルの開発用TRAiNバックエンドへ向けたい場合):
 ```powershell
 $env:TRAIN_LAUNCHER_API_BASE_URL = "http://localhost:8787"
@@ -182,9 +198,23 @@ frontend/          # React + Vite + TypeScript + Fluent UI React v9 (`@fluentui/
 - 起動中はJavaの検索・取得状況と選択した実行ファイルを表示し、実際に使用したJavaのバージョン・アーキテクチャ・パスを各プロファイルの `train-launcher-process.log` の先頭に記録します
 - Windows で `cargo build` 時に MSVC ヘッダ(`vcruntime.h` 等)が見つからないエラーが出る場合は、Visual Studio Installer で「C++ によるデスクトップ開発」ワークロードが正しくインストールされているか確認してください
 
+### 依存関係のセキュリティ更新と上流制約
+
+直接利用するZIP処理は `zip 9.0.5`、Tauriは `2.12.5`、updaterは `2.14.0` に更新しています。RustのTLS/QUIC・信頼ストアと、開発用Vite/source-map-jsも修正版をロックファイルに固定します。既存の手動ZIP展開にあるパス制限・リンク拒否・SUID/SGID除去は維持し、既定の一括展開へ置き換えません。
+
+次の上流制約は未解消です。機能削除や互換性のない強制上書きでスキャナーだけを通すことはしません。
+
+| 残る依存関係 | 制約・影響範囲・対応 |
+| --- | --- |
+| updaterの `zip 4.6.1` | 最新のupdater `2.14.0` でも既定のWindows ZIP互換機能は `zip ^4` を要求します。`RUSTSEC-2026-0367` / `0368` / `0369` の修正版は9系で、直接利用分だけを9系へ更新してもこの経路は残ります。署名検証後だけ展開する既存の境界を維持し、署名キーを保護してください。上流の依存更新/修正バックポートが必要です |
+| Linuxの `glib 0.18.5` | Tauri `2.12.5`・runtime-wry `2.12.3` はGTK `^0.18` / WebKitGTKを要求し、`GHSA-wrw7-89jp-8q8g` の修正版GLib `>=0.20` とは互換になりません。Windowsの通常/ビルド依存には含まれません。GTK3系上流の修正または対応する親更新が必要です |
+| 保守終了通知4件 | Linux GTK由来の `proc-macro-error` と、opener→`zbus 5` 由来の `zvariant` / `zvariant_derive` / `zbus_names` は残ります。最新版opener `2.7.2` でも `zbus ^5.9` で、zbus 6への移行は上流対応待ちです。これは実証された脆弱性4件という意味ではありません。Tauri更新でUNIC系5件の保守終了依存は解消します |
+
 ## リリース手順(メンテナー向け)
 
 ランチャー自体の自動アップデート機能(`tauri-plugin-updater`)は GitHub Releases を配布元としています。新バージョンを配布するには以下の手順を行ってください。
+
+署名ジョブで使うすべての外部Actionは、公式リポジトリのバージョン・実装を確認した40桁のコミットSHAへ固定しています。`.github/dependabot.yml` が週次で更新PRを作成します。更新時も上流の所有者・タグとコミットの対応・実装差分を確認し、可変タグやブランチ参照へ戻さないでください。署名キーは引き続きビルド・署名ステップだけに渡します。
 
 1. **バージョン番号を更新する**: `apps/desktop/tauri.conf.json` の `version` と、`Cargo.toml` の `[workspace.package] version` を新しいバージョン(例: `0.2.0`)へ揃えて更新し、`main`(または開発ブランチ経由で)へマージする
 2. **タグを作成してpushする**:

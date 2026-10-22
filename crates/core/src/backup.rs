@@ -1399,7 +1399,7 @@ mod tests {
             let mut file = archive.by_index(index).unwrap();
             let mut data = Vec::new();
             file.read_to_end(&mut data).unwrap();
-            entries.insert(file.name().to_owned(), data);
+            entries.insert(file.name().unwrap().into_owned(), data);
         }
         entries
     }

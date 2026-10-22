@@ -41,7 +41,7 @@ impl Provider {
 }
 
 /// `access_token` 以外の付随情報。容量の小さい2つ目のエントリとして保存する。
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 struct TokenMeta {
     refresh_token: Option<String>,
     expires_at: Option<i64>,
@@ -59,7 +59,7 @@ struct TokenMeta {
 
 /// 保存対象のトークン情報。アクセストークン/リフレッシュトークン/有効期限(UNIX秒)に加え、
 /// UIに表示するための表示名(Discordユーザー名やMinecraftプレイヤー名)も保持する。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct TokenRecord {
     pub access_token: String,
     pub refresh_token: Option<String>,
@@ -76,6 +76,19 @@ pub struct TokenRecord {
     /// 後方互換を保つ(その場合は`None`になる)。
     #[serde(default)]
     pub user_id: Option<String>,
+}
+
+impl std::fmt::Debug for TokenRecord {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TokenRecord")
+            .field("access_token", &"<redacted>")
+            .field("refresh_token", &self.refresh_token.as_ref().map(|_| "<redacted>"))
+            .field("expires_at", &self.expires_at)
+            .field("display_name", &self.display_name)
+            .field("uuid", &self.uuid)
+            .field("user_id", &self.user_id)
+            .finish()
+    }
 }
 
 /// トークンを資格情報ストアに保存する(既存エントリは上書き)。
@@ -141,4 +154,31 @@ pub fn delete_token(provider: Provider) -> Result<(), AuthError> {
     };
 
     primary.and(meta)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn minecraft_and_refresh_credentials_are_never_debug_formatted() {
+        let access = "synthetic-minecraft-proof";
+        let refresh = "synthetic-refresh-proof";
+        let record = TokenRecord {
+            access_token: access.into(), refresh_token: Some(refresh.into()),
+            expires_at: Some(123), display_name: Some("Player".into()),
+            uuid: None, user_id: None,
+        };
+        let minecraft = crate::xbox::MinecraftToken {
+            access_token: access.into(), uuid: None, username: None,
+        };
+        let microsoft = crate::msa::MsaToken {
+            access_token: access.into(), refresh_token: Some(refresh.into()), expires_at: None,
+        };
+        for debug in [format!("{record:?}"), format!("{minecraft:?}"), format!("{microsoft:?}")] {
+            assert!(!debug.contains(access));
+            assert!(!debug.contains(refresh));
+            assert!(debug.contains("<redacted>"));
+        }
+    }
 }

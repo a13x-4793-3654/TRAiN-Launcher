@@ -25,7 +25,15 @@ jobs:
         run: cargo test --locked -p train-launcher-core -p train-launcher-auth -p train-launcher-server-api --lib
       - name: Desktop IPC and owner-only ticket regression tests
         if: runner.os == 'Windows'
-        run: cargo test --locked -p train-launcher-desktop --lib
+        run: cargo test --locked -p train-launcher-desktop --lib --test updater
+      - name: Reject legacy ZIP in the Windows runtime dependency tree
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $tree = cargo tree --locked --target x86_64-pc-windows-msvc --edges normal,build --prefix none --format '{p}'
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot inspect Windows dependencies' }
+          $legacy = $tree | Where-Object { $_ -match '^zip v(\d+)\.' -and [int]$Matches[1] -lt 9 }
+          if ($legacy) { throw 'Unsupported legacy ZIP dependency in the Windows runtime tree' }
 
   frontend:
     runs-on: ubuntu-22.04
@@ -34,6 +42,6 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 20
-      - run: npm ci
+      - run: npm ci --no-audit
       - run: npm run test --workspace=frontend
       - run: npm run build

@@ -202,11 +202,14 @@ frontend/          # React + Vite + TypeScript + Fluent UI React v9 (`@fluentui/
 
 直接利用するZIP処理は `zip 9.0.5`、Tauriは `2.12.5`、updaterは `2.14.0` に更新しています。RustのTLS/QUIC・信頼ストアと、開発用Vite/source-map-jsも修正版をロックファイルに固定します。既存の手動ZIP展開にあるパス制限・リンク拒否・SUID/SGID除去は維持し、既定の一括展開へ置き換えません。
 
-次の上流制約は未解消です。機能削除や互換性のない強制上書きでスキャナーだけを通すことはしません。
+updaterの既定 `zip` 機能は、Windowsの旧 `.exe.zip` / `.msi.zip` とLinuxの旧圧縮AppImage向け互換機能です。v0.1.13で公開済みの署名付き `latest.json` はWindowsの生のEXE/MSI、Linuxの生のAppImage/deb/rpm、macOSの `.app.tar.gz` を使用しており、`createUpdaterArtifacts: true` と `updaterJsonPreferNsis: true` を維持します。この使用実績を確認した上で、未使用の旧形式だけを公式のCargo機能指定で無効化し、`zip 4` と3件のZIPアドバイザリを依存関係から除きます。TLS・システムプロキシ・署名検証・生のEXE/MSI処理は維持し、macOSのtar/gzipは別の必須依存のため無効化しません。公開形式の回帰テストとWindowsの実依存ツリー確認をCIに含めます。将来 `v1Compatible` や旧アーカイブ配布へ変更する場合は、この制約を再確認してください。
+
+上流の機能定義・形式ごとの処理は [updater 2.14.0の固定ソース](https://github.com/tauri-apps/plugins-workspace/tree/44293a5722efcaf27060504e63b17aeba721b40f/plugins/updater)で確認できます。CIの `npm ci` では自動監査を無効化し、非公開workspaceの識別情報を外部監査サービスへ送らないようにします。依存監査時は公開レジストリのパッケージ名・バージョンだけを抽出してください。
+
+次の上流制約は未解消です。使用中の機能削除や互換性のない強制上書きでスキャナーだけを通すことはしません。
 
 | 残る依存関係 | 制約・影響範囲・対応 |
 | --- | --- |
-| updaterの `zip 4.6.1` | 最新のupdater `2.14.0` でも既定のWindows ZIP互換機能は `zip ^4` を要求します。`RUSTSEC-2026-0367` / `0368` / `0369` の修正版は9系で、直接利用分だけを9系へ更新してもこの経路は残ります。署名検証後だけ展開する既存の境界を維持し、署名キーを保護してください。上流の依存更新/修正バックポートが必要です |
 | Linuxの `glib 0.18.5` | Tauri `2.12.5`・runtime-wry `2.12.3` はGTK `^0.18` / WebKitGTKを要求し、`GHSA-wrw7-89jp-8q8g` の修正版GLib `>=0.20` とは互換になりません。Windowsの通常/ビルド依存には含まれません。GTK3系上流の修正または対応する親更新が必要です |
 | 保守終了通知4件 | Linux GTK由来の `proc-macro-error` と、opener→`zbus 5` 由来の `zvariant` / `zvariant_derive` / `zbus_names` は残ります。最新版opener `2.7.2` でも `zbus ^5.9` で、zbus 6への移行は上流対応待ちです。これは実証された脆弱性4件という意味ではありません。Tauri更新でUNIC系5件の保守終了依存は解消します |
 

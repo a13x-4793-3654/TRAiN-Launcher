@@ -27,10 +27,14 @@ const DISCORD_REFRESH_MARGIN_SECS: i64 = 5 * 60;
 const DISCORD_REFRESH_CHECK_INTERVAL: Duration = Duration::from_secs(60);
 
 #[derive(Default)]
-struct DiscordCredentials(tokio::sync::Mutex<()>);
+struct DiscordCredentials(tokio::sync::Mutex<bool>);
 
 fn discord_needs_refresh(expires_at: Option<i64>, now: i64) -> bool {
     expires_at.is_none_or(|expiry| expiry <= now.saturating_add(DISCORD_REFRESH_MARGIN_SECS))
+}
+
+fn discord_should_refresh(restored: bool, expires_at: Option<i64>, now: i64) -> bool {
+    !restored || discord_needs_refresh(expires_at, now)
 }
 
 fn updated_discord_record(
@@ -46,37 +50,46 @@ fn updated_discord_record(
 /// 期限が近い場合のみ更新し、ローテーション後のトークンをユーザー情報と共に保存する。
 /// サインイン・サインアウトとも同じロックを使い、古い更新結果による上書きを防ぐ。
 async fn current_discord_token(app_handle: &AppHandle) -> Result<Option<TokenRecord>, String> {
+    restore_discord_session(app_handle).await.map_err(|err| err.to_string())
+}
+
+async fn restore_discord_session(
+    app_handle: &AppHandle,
+) -> Result<Option<TokenRecord>, train_launcher_auth::AuthError> {
+    use train_launcher_auth::AuthError;
     let credentials = app_handle.state::<DiscordCredentials>();
-    let _guard = credentials.0.lock().await;
-    let Some(mut record) = store::load_token(Provider::Discord).map_err(|err| err.to_string())?
+    // 初回は期限に関係なく更新し、その後は期限直前に更新する。
+    let mut restored = credentials.0.lock().await;
+    let Some(mut record) = store::load_token(Provider::Discord)?
     else {
         return Ok(None);
     };
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_err(|err| err.to_string())?
+        .map_err(|err| AuthError::Oauth(err.to_string()))?
         .as_secs() as i64;
-    if !discord_needs_refresh(record.expires_at, now) {
+    if !discord_should_refresh(*restored, record.expires_at, now) {
         return Ok(Some(record));
     }
     let Some(refresh_token) = record.refresh_token.as_deref() else {
         if record.expires_at.is_none_or(|expiry| expiry <= now) {
-            return Err("Discordの認証が期限切れです。再度サインインしてください".to_string());
+            return Err(AuthError::DiscordReauthenticationRequired);
         }
+        *restored = true;
         return Ok(Some(record));
     };
-    let config = config::DiscordConfig::from_env().map_err(|err| err.to_string())?;
+    let config = config::DiscordConfig::from_env()?;
     let refreshed = discord::refresh_access_token(&config, refresh_token)
-        .await
-        .map_err(|err| format!("Discordの認証を更新できませんでした。通信状態を確認するか、再度サインインしてください ({err})"))?;
+        .await?;
     record = updated_discord_record(record, refreshed);
-    store::save_token(Provider::Discord, &record).map_err(|err| err.to_string())?;
+    store::save_token(Provider::Discord, &record)?;
+    *restored = true;
     Ok(Some(record))
 }
 
 #[cfg(test)]
 mod discord_refresh_tests {
-    use super::{discord_needs_refresh, updated_discord_record, DISCORD_REFRESH_MARGIN_SECS};
+    use super::{discord_needs_refresh, discord_should_refresh, updated_discord_record, DISCORD_REFRESH_MARGIN_SECS};
     use train_launcher_auth::discord::DiscordRefreshToken;
     use train_launcher_auth::store::TokenRecord;
 
@@ -93,6 +106,15 @@ mod discord_refresh_tests {
         ));
         assert!(discord_needs_refresh(Some(now - 1), now));
         assert!(discord_needs_refresh(None, now));
+    }
+
+    #[test]
+    fn restores_once_at_startup_even_when_access_token_is_not_expired() {
+        let now = 1_000_000;
+        let expiry = Some(now + 7 * 24 * 60 * 60);
+        assert!(discord_should_refresh(false, expiry, now));
+        assert!(!discord_should_refresh(true, expiry, now));
+        assert!(discord_should_refresh(true, Some(now - 1), now));
     }
 
     #[test]
@@ -148,7 +170,7 @@ async fn sign_in_with_discord(app_handle: AppHandle) -> Result<SignInResult, Str
     .map_err(|err| err.to_string())?;
 
     let credentials = app_handle.state::<DiscordCredentials>();
-    let _guard = credentials.0.lock().await;
+    let mut restored = credentials.0.lock().await;
     store::save_token(
         Provider::Discord,
         &TokenRecord {
@@ -161,6 +183,7 @@ async fn sign_in_with_discord(app_handle: AppHandle) -> Result<SignInResult, Str
         },
     )
     .map_err(|err| err.to_string())?;
+    *restored = true;
 
     Ok(SignInResult {
         display_name: token.username,
@@ -300,7 +323,8 @@ async fn sign_in_with_microsoft(app_handle: AppHandle) -> Result<SignInResult, S
 #[tauri::command]
 async fn sign_out_discord(app_handle: AppHandle) -> Result<(), String> {
     let credentials = app_handle.state::<DiscordCredentials>();
-    let _guard = credentials.0.lock().await;
+    let mut restored = credentials.0.lock().await;
+    *restored = false;
     store::delete_token(Provider::Discord).map_err(|err| err.to_string())
 }
 
@@ -315,13 +339,17 @@ fn sign_out_microsoft() -> Result<(), String> {
 struct AuthStatus {
     discord_display_name: Option<String>,
     microsoft_display_name: Option<String>,
+    discord_reauthentication_required: bool,
 }
 
 #[tauri::command]
-fn get_auth_status() -> Result<AuthStatus, String> {
-    let discord_display_name = store::load_token(Provider::Discord)
-        .map_err(|err| err.to_string())?
-        .and_then(|record| record.display_name);
+async fn get_auth_status(app_handle: AppHandle) -> Result<AuthStatus, String> {
+    let (discord_display_name, discord_reauthentication_required) =
+        match restore_discord_session(&app_handle).await {
+            Ok(record) => (record.and_then(|record| record.display_name), false),
+            Err(train_launcher_auth::AuthError::DiscordReauthenticationRequired) => (None, true),
+            Err(err) => return Err(err.to_string()),
+        };
     let microsoft_display_name = store::load_token(Provider::Microsoft)
         .map_err(|err| err.to_string())?
         .and_then(|record| record.display_name);
@@ -329,6 +357,7 @@ fn get_auth_status() -> Result<AuthStatus, String> {
     Ok(AuthStatus {
         discord_display_name,
         microsoft_display_name,
+        discord_reauthentication_required,
     })
 }
 

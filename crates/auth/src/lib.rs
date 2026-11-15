@@ -32,6 +32,8 @@ mod error {
         /// OAuth2トークンエンドポイントとのやり取りで発生したエラー。
         #[error("oauth2 error: {0}")]
         Oauth(String),
+        #[error("Discordの認証が失効しています。長期間利用していない場合や連携が解除された場合は、再度サインインしてください")]
+        DiscordReauthenticationRequired,
         /// Minecraft/XboxLive認証チェーンで発生したエラー。
         #[error("minecraft authentication error: {0}")]
         Minecraft(String),

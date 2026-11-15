@@ -27,7 +27,24 @@ const DISCORD_REFRESH_MARGIN_SECS: i64 = 5 * 60;
 const DISCORD_REFRESH_CHECK_INTERVAL: Duration = Duration::from_secs(60);
 
 #[derive(Default)]
-struct DiscordCredentials(tokio::sync::Mutex<bool>);
+struct DiscordCredentials(tokio::sync::Mutex<DiscordSessionState>);
+
+#[derive(Default)]
+struct DiscordSessionState {
+    restored: bool,
+    retry_at: Option<std::time::Instant>,
+    failures: u32,
+    error: Option<String>,
+}
+
+impl DiscordSessionState {
+    fn defer_retry(&mut self, message: String) {
+        self.failures = self.failures.saturating_add(1);
+        let seconds = (30_u64 << self.failures.min(4)).min(300);
+        self.retry_at = Some(std::time::Instant::now() + Duration::from_secs(seconds));
+        self.error = Some(message);
+    }
+}
 
 fn discord_needs_refresh(expires_at: Option<i64>, now: i64) -> bool {
     expires_at.is_none_or(|expiry| expiry <= now.saturating_add(DISCORD_REFRESH_MARGIN_SECS))
@@ -59,7 +76,7 @@ async fn restore_discord_session(
     use train_launcher_auth::AuthError;
     let credentials = app_handle.state::<DiscordCredentials>();
     // 初回は期限に関係なく更新し、その後は期限直前に更新する。
-    let mut restored = credentials.0.lock().await;
+    let mut state = credentials.0.lock().await;
     let Some(mut record) = store::load_token(Provider::Discord)?
     else {
         return Ok(None);
@@ -68,28 +85,57 @@ async fn restore_discord_session(
         .duration_since(UNIX_EPOCH)
         .map_err(|err| AuthError::Oauth(err.to_string()))?
         .as_secs() as i64;
-    if !discord_should_refresh(*restored, record.expires_at, now) {
+    if !discord_should_refresh(state.restored, record.expires_at, now) {
         return Ok(Some(record));
+    }
+    if state.retry_at.is_some_and(|retry| std::time::Instant::now() < retry) {
+        if record.expires_at.is_some_and(|expiry| expiry > now) {
+            return Ok(Some(record));
+        }
+        return Err(AuthError::Oauth(state.error.clone().unwrap_or_else(|| {
+            "Discordの認証更新を待機しています".to_string()
+        })));
     }
     let Some(refresh_token) = record.refresh_token.as_deref() else {
         if record.expires_at.is_none_or(|expiry| expiry <= now) {
             return Err(AuthError::DiscordReauthenticationRequired);
         }
-        *restored = true;
+        state.restored = true;
         return Ok(Some(record));
     };
     let config = config::DiscordConfig::from_env()?;
-    let refreshed = discord::refresh_access_token(&config, refresh_token)
-        .await?;
+    let refreshed = match discord::refresh_access_token(&config, refresh_token).await {
+        Ok(refreshed) => refreshed,
+        Err(AuthError::DiscordReauthenticationRequired) => {
+            // 別プロセスが更新済みなら、ローテーション前の値での失敗を失効と誤認しない。
+            if let Some(latest) = store::load_token(Provider::Discord)? {
+                if latest.refresh_token != record.refresh_token
+                    && latest.expires_at.is_some_and(|expiry| expiry > now)
+                {
+                    *state = DiscordSessionState::default();
+                    return Ok(Some(latest));
+                }
+            }
+            return Err(AuthError::DiscordReauthenticationRequired);
+        }
+        Err(err) => {
+            eprintln!("failed to refresh Discord credentials: {err}");
+            state.defer_retry(err.to_string());
+            if record.expires_at.is_some_and(|expiry| expiry > now) {
+                return Ok(Some(record));
+            }
+            return Err(err);
+        }
+    };
     record = updated_discord_record(record, refreshed);
     store::save_token(Provider::Discord, &record)?;
-    *restored = true;
+    *state = DiscordSessionState { restored: true, ..Default::default() };
     Ok(Some(record))
 }
 
 #[cfg(test)]
 mod discord_refresh_tests {
-    use super::{discord_needs_refresh, discord_should_refresh, updated_discord_record, DISCORD_REFRESH_MARGIN_SECS};
+    use super::{discord_needs_refresh, discord_should_refresh, updated_discord_record, DiscordSessionState, DISCORD_REFRESH_MARGIN_SECS};
     use train_launcher_auth::discord::DiscordRefreshToken;
     use train_launcher_auth::store::TokenRecord;
 
@@ -115,6 +161,19 @@ mod discord_refresh_tests {
         assert!(discord_should_refresh(false, expiry, now));
         assert!(!discord_should_refresh(true, expiry, now));
         assert!(discord_should_refresh(true, Some(now - 1), now));
+    }
+
+    #[test]
+    fn temporary_failures_back_off_and_retain_the_error() {
+        let mut state = DiscordSessionState::default();
+        for _ in 0..10 {
+            let before = std::time::Instant::now();
+            state.defer_retry("offline".to_string());
+            let delay = state.retry_at.unwrap().duration_since(before).as_secs();
+            assert!((60..=300).contains(&delay));
+            assert_eq!(state.error.as_deref(), Some("offline"));
+        }
+        assert_eq!(state.failures, 10);
     }
 
     #[test]
@@ -170,7 +229,7 @@ async fn sign_in_with_discord(app_handle: AppHandle) -> Result<SignInResult, Str
     .map_err(|err| err.to_string())?;
 
     let credentials = app_handle.state::<DiscordCredentials>();
-    let mut restored = credentials.0.lock().await;
+    let mut state = credentials.0.lock().await;
     store::save_token(
         Provider::Discord,
         &TokenRecord {
@@ -183,7 +242,7 @@ async fn sign_in_with_discord(app_handle: AppHandle) -> Result<SignInResult, Str
         },
     )
     .map_err(|err| err.to_string())?;
-    *restored = true;
+    *state = DiscordSessionState { restored: true, ..Default::default() };
 
     Ok(SignInResult {
         display_name: token.username,
@@ -323,8 +382,8 @@ async fn sign_in_with_microsoft(app_handle: AppHandle) -> Result<SignInResult, S
 #[tauri::command]
 async fn sign_out_discord(app_handle: AppHandle) -> Result<(), String> {
     let credentials = app_handle.state::<DiscordCredentials>();
-    let mut restored = credentials.0.lock().await;
-    *restored = false;
+    let mut state = credentials.0.lock().await;
+    *state = DiscordSessionState::default();
     store::delete_token(Provider::Discord).map_err(|err| err.to_string())
 }
 
@@ -340,15 +399,23 @@ struct AuthStatus {
     discord_display_name: Option<String>,
     microsoft_display_name: Option<String>,
     discord_reauthentication_required: bool,
+    discord_error: Option<String>,
 }
 
 #[tauri::command]
 async fn get_auth_status(app_handle: AppHandle) -> Result<AuthStatus, String> {
-    let (discord_display_name, discord_reauthentication_required) =
+    let (discord_display_name, discord_reauthentication_required, discord_error) =
         match restore_discord_session(&app_handle).await {
-            Ok(record) => (record.and_then(|record| record.display_name), false),
-            Err(train_launcher_auth::AuthError::DiscordReauthenticationRequired) => (None, true),
-            Err(err) => return Err(err.to_string()),
+            Ok(record) => {
+                let credentials = app_handle.state::<DiscordCredentials>();
+                let error = credentials.0.lock().await.error.clone();
+                (record.and_then(|record| record.display_name), false, error)
+            }
+            Err(train_launcher_auth::AuthError::DiscordReauthenticationRequired) => (None, true, None),
+            Err(err) => {
+                eprintln!("failed to restore Discord session: {err}");
+                (None, false, Some(err.to_string()))
+            }
         };
     let microsoft_display_name = store::load_token(Provider::Microsoft)
         .map_err(|err| err.to_string())?
@@ -358,6 +425,7 @@ async fn get_auth_status(app_handle: AppHandle) -> Result<AuthStatus, String> {
         discord_display_name,
         microsoft_display_name,
         discord_reauthentication_required,
+        discord_error,
     })
 }
 

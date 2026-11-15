@@ -251,10 +251,14 @@ mod refresh_tests {
             ("", "saved-refresh"),
         ] {
             let body = format!(r#"{{"access_token":"new-access","token_type":"Bearer","expires_in":604800{extra}}}"#);
+            let before = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
             let token = refresh("200 OK", &body).await.unwrap();
+            let after = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
             assert_eq!(token.access_token, "new-access");
             assert_eq!(token.refresh_token, expected);
-            assert!(token.expires_at.is_some());
+            assert!((before + 604800..=after + 604800).contains(&token.expires_at.unwrap()));
         }
     }
 

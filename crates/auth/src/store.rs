@@ -9,6 +9,8 @@
 //! `refresh_token`/`expires_at`/`display_name` を別々の2エントリに分割して保存する
 //! (MinecraftのアクセストークンとMSAのリフレッシュトークンはどちらも長大なJWT/不透明文字列
 //! であり、1エントリにまとめると容量制限を超えることがあるため)。
+//! 短いDiscordトークンは更新の原子性を保つため1エントリへまとめて保存する。
+//! 従来の2エントリ形式も読み込み可能で、次回保存時に移行する。
 
 use serde::{Deserialize, Serialize};
 
@@ -82,8 +84,14 @@ pub struct TokenRecord {
 ///
 /// `access_token` と付随情報(`refresh_token`/`expires_at`/`display_name`/`uuid`)を別エントリに
 /// 分割して保存する(理由は本モジュールのドキュメントコメントを参照)。
+/// Discordのみ、レコード全体を1エントリで置き換える。
 pub fn save_token(provider: Provider, record: &TokenRecord) -> Result<(), AuthError> {
     let entry = keyring::Entry::new(SERVICE_NAME, provider.keyring_user())?;
+    // Discordの短いトークンは1エントリにまとめ、更新中の部分保存を防ぐ。
+    if provider == Provider::Discord {
+        entry.set_password(&serde_json::to_string(record)?)?;
+        return Ok(());
+    }
     entry.set_password(&record.access_token)?;
 
     let meta = TokenMeta {
@@ -107,6 +115,9 @@ pub fn load_token(provider: Provider) -> Result<Option<TokenRecord>, AuthError> 
         Err(keyring::Error::NoEntry) => return Ok(None),
         Err(err) => return Err(err.into()),
     };
+    if provider == Provider::Discord && access_token.starts_with('{') {
+        return Ok(Some(serde_json::from_str(&access_token)?));
+    }
 
     let meta_entry = keyring::Entry::new(SERVICE_NAME, provider.keyring_user_meta())?;
     let meta = match meta_entry.get_password() {

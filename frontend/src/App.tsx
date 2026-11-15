@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   FluentProvider,
   makeStyles,
@@ -13,6 +13,12 @@ import {
   ToastTitle,
   ToastBody,
   Spinner,
+  Dialog,
+  DialogSurface,
+  DialogBody,
+  DialogTitle,
+  DialogContent,
+  DialogActions,
 } from "@fluentui/react-components";
 import type { SelectTabEventHandler } from "@fluentui/react-components";
 import {
@@ -47,6 +53,8 @@ interface SignInResult {
 interface AuthStatus {
   discord_display_name: string | null;
   microsoft_display_name: string | null;
+  discord_reauthentication_required: boolean;
+  discord_error: string | null;
 }
 
 const useStyles = makeStyles({
@@ -116,19 +124,62 @@ function AppShell() {
   const [authStatus, setAuthStatus] = useState<AuthStatus>({
     discord_display_name: null,
     microsoft_display_name: null,
+    discord_reauthentication_required: false,
+    discord_error: null,
   });
   const [discordSigningIn, setDiscordSigningIn] = useState(false);
   const [microsoftSigningIn, setMicrosoftSigningIn] = useState(false);
+  const [reauthenticationOpen, setReauthenticationOpen] = useState(false);
+  const reauthenticationNotified = useRef(false);
+  const lastAuthError = useRef<string | null>(null);
+  const authRequest = useRef(0);
 
   const refreshAuthStatus = () => {
+    const request = ++authRequest.current;
     invoke<AuthStatus>("get_auth_status")
-      .then(setAuthStatus)
-      .catch((err) => console.error("failed to load auth status", err));
+      .then((status) => {
+        if (request !== authRequest.current) return;
+        setAuthStatus(status);
+        if (status.discord_error && lastAuthError.current !== status.discord_error) {
+          dispatchToast(
+            <Toast>
+              <ToastTitle>Discordの認証更新を再試行します</ToastTitle>
+              <ToastBody>{status.discord_error}</ToastBody>
+            </Toast>,
+            { intent: "warning" },
+          );
+        }
+        lastAuthError.current = status.discord_error;
+        if (status.discord_reauthentication_required && !reauthenticationNotified.current) {
+          setReauthenticationOpen(true);
+        }
+        reauthenticationNotified.current = status.discord_reauthentication_required;
+      })
+      .catch((err) => {
+        if (request !== authRequest.current) return;
+        console.error("failed to load auth status", err);
+        const message = String(err);
+        if (lastAuthError.current !== message) {
+          dispatchToast(
+            <Toast>
+              <ToastTitle>認証状態を確認できませんでした</ToastTitle>
+              <ToastBody>{message} 保存済みの認証情報は保持し、自動的に再試行します。</ToastBody>
+            </Toast>,
+            { intent: "warning" },
+          );
+          lastAuthError.current = message;
+        }
+      });
   };
 
   // 起動時に保存済みセッション(keyring)からサインイン状態を復元する。
   useEffect(() => {
     refreshAuthStatus();
+    const timer = window.setInterval(refreshAuthStatus, 60_000);
+    return () => {
+      window.clearInterval(timer);
+      ++authRequest.current;
+    };
   }, []);
 
   // 起動直後に一度だけランチャー自体のアップデートをサイレントに確認する。
@@ -164,6 +215,7 @@ function AppShell() {
     );
 
   const handleDiscordSignIn = () => {
+    ++authRequest.current;
     setDiscordSigningIn(true);
     invoke<SignInResult>("sign_in_with_discord")
       .then((result) => {
@@ -186,6 +238,7 @@ function AppShell() {
   };
 
   const handleDiscordSignOut = () => {
+    ++authRequest.current;
     invoke("sign_out_discord")
       .then(() => refreshAuthStatus())
       .catch((err) => notifyError("Discord", err));
@@ -282,6 +335,23 @@ function AppShell() {
       <LaunchingModal />
       <GameDataOperationModal />
       <CrashReportConsentModal />
+      <Dialog open={reauthenticationOpen} onOpenChange={(_, data) => setReauthenticationOpen(data.open)}>
+        <DialogSurface>
+          <DialogBody>
+            <DialogTitle>Discordの再認証が必要です</DialogTitle>
+            <DialogContent>
+              保存済みのDiscord認証を更新できませんでした。長期間ランチャーを起動していなかった場合や、Discordの連携が解除された場合は、再度サインインしてください。
+            </DialogContent>
+            <DialogActions>
+              <Button onClick={() => setReauthenticationOpen(false)}>後で</Button>
+              <Button appearance="primary" disabled={discordSigningIn} onClick={() => {
+                setReauthenticationOpen(false);
+                handleDiscordSignIn();
+              }}>Discordでサインイン</Button>
+            </DialogActions>
+          </DialogBody>
+        </DialogSurface>
+      </Dialog>
     </div>
   );
 }

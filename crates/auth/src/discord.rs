@@ -147,18 +147,41 @@ pub async fn refresh_access_token(
     config: &DiscordConfig,
     refresh_token: &str,
 ) -> Result<DiscordRefreshToken, AuthError> {
+    refresh_access_token_at(config, refresh_token, DISCORD_TOKEN_URL).await
+}
+
+async fn refresh_access_token_at(
+    config: &DiscordConfig,
+    refresh_token: &str,
+    token_url: &str,
+) -> Result<DiscordRefreshToken, AuthError> {
     let mut client = BasicClient::new(ClientId::new(config.client_id.clone()))
-        .set_token_uri(TokenUrl::new(DISCORD_TOKEN_URL.to_string()).expect("static URL is valid"));
+        .set_token_uri(TokenUrl::new(token_url.to_string())
+            .map_err(|_| AuthError::Oauth("Discordの認証URLが正しくありません".to_string()))?);
     if let Some(secret) = &config.client_secret {
         client = client.set_client_secret(ClientSecret::new(secret.clone()));
     }
 
-    let http_client = oauth2::reqwest::Client::new();
+    let http_client = oauth2::reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .redirect(oauth2::reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|_| AuthError::Oauth("Discordの認証クライアントを作成できませんでした".to_string()))?;
     let token = client
         .exchange_refresh_token(&RefreshToken::new(refresh_token.to_string()))
         .request_async(&http_client)
         .await
-        .map_err(|err| AuthError::Oauth(err.to_string()))?;
+        .map_err(|err| match &err {
+            oauth2::RequestTokenError::ServerResponse(response)
+                if response.error() == &oauth2::basic::BasicErrorResponseType::InvalidGrant =>
+            {
+                AuthError::DiscordReauthenticationRequired
+            }
+            _ => AuthError::Oauth(
+                "Discordの認証を更新できませんでした。通信状態を確認して再試行してください"
+                    .to_string(),
+            ),
+        })?;
     let expires_at = token.expires_in().map(|duration| {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -173,6 +196,85 @@ pub async fn refresh_access_token(
             .unwrap_or_else(|| refresh_token.to_string()),
         expires_at,
     })
+}
+
+#[cfg(test)]
+mod refresh_tests {
+    use super::*;
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    async fn refresh(status: &str, body: &str) -> Result<DiscordRefreshToken, AuthError> {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/token", listener.local_addr().unwrap());
+        let response = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut reader = BufReader::new(socket);
+            let mut length = 0;
+            loop {
+                let mut line = String::new();
+                assert!(reader.read_line(&mut line).await.unwrap() > 0);
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = value.trim().parse::<usize>().unwrap();
+                }
+            }
+            let mut request = vec![0; length];
+            reader.read_exact(&mut request).await.unwrap();
+            let request = String::from_utf8(request).unwrap();
+            assert!(request.contains("grant_type=refresh_token"));
+            assert!(request.contains("refresh_token=saved-refresh"));
+            reader.get_mut().write_all(response.as_bytes()).await.unwrap();
+        });
+        let result = refresh_access_token_at(
+            &DiscordConfig {
+                client_id: "test-client".into(),
+                client_secret: None,
+                callback_port: 38271,
+            },
+            "saved-refresh",
+            &url,
+        ).await;
+        server.await.unwrap();
+        result
+    }
+
+    #[tokio::test]
+    async fn refresh_rotates_tokens_and_preserves_refresh_token_if_omitted() {
+        for (extra, expected) in [
+            (r#","refresh_token":"rotated-refresh""#, "rotated-refresh"),
+            ("", "saved-refresh"),
+        ] {
+            let body = format!(r#"{{"access_token":"new-access","token_type":"Bearer","expires_in":604800{extra}}}"#);
+            let before = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+            let token = refresh("200 OK", &body).await.unwrap();
+            let after = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+            assert_eq!(token.access_token, "new-access");
+            assert_eq!(token.refresh_token, expected);
+            assert!((before + 604800..=after + 604800).contains(&token.expires_at.unwrap()));
+        }
+    }
+
+    #[tokio::test]
+    async fn only_invalid_grant_requires_reauthentication() {
+        let error = refresh("400 Bad Request", r#"{"error":"invalid_grant"}"#).await.unwrap_err();
+        assert!(matches!(error, AuthError::DiscordReauthenticationRequired));
+        for (status, body) in [
+            ("503 Service Unavailable", r#"{"error":"temporarily_unavailable"}"#),
+            ("400 Bad Request", r#"{"error":"invalid_client"}"#),
+        ] {
+            let error = refresh(status, body).await.unwrap_err();
+            assert!(matches!(error, AuthError::Oauth(_)));
+            assert!(!error.to_string().contains("再度サインイン"));
+        }
+    }
 }
 
 /// ローカルループバックサーバで1回だけリダイレクトを受け付け、`code`/`state` クエリ
